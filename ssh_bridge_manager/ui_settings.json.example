@@ -1,0 +1,9 @@
+{
+  "theme": "aurora",
+  "lang": "auto",
+  "macros": [
+    { "name": "AT", "data": "AT\r\n", "hex": false },
+    { "name": "Ctrl+C", "data": "03", "hex": true }
+  ],
+  "updated_at": null
+}

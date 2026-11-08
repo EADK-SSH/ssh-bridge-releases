@@ -1,0 +1,4 @@
+Embedded NFSv3 engine for nfs-c is based on WinNFSd 2.4.0
+https://github.com/winnfsd/winnfsd
+License: GPL
+Integrated into nfs-c process (not calling haneWIN).

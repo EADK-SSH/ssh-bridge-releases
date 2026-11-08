@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>局域网板子管理</title>
+<style>
+:root {
+  --bg-top: #202020;
+  --bg-mid: #1c1c1c;
+  --bg-bottom: #1a1a1a;
+  --sidebar-bg: #242424;
+  --text: #ffffff;
+  --muted: #cfcfcf;
+  --line: rgba(255,255,255,.09);
+  --accent: #60cdff;
+  --accent-strong: #4cc2ff;
+  --accent-soft: rgba(96,205,255,.14);
+  --ok: #6ccb5f;
+  --err: #ff99a4;
+  --card: #2c2c2c;
+  --btn-radius: 4px;
+  --card-radius: 6px;
+  --chip-radius: 4px;
+  --ctrl-h: 28px;
+  --btn-pad-x: 10px;
+  --btn-pad-y: 4px;
+  --btn-font-weight: 600;
+  --r: var(--card-radius, 6px);
+  --r2: var(--btn-radius, 4px);
+  --mono: Consolas, 'Cascadia Mono', monospace;
+  --sans: 'Segoe UI Variable', 'Segoe UI', 'Microsoft YaHei', sans-serif;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overscroll-behavior: none; }
+body {
+  font-family: var(--sans);
+  color: var(--text);
+  background: var(--bg-mid);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  transition: background .2s ease, color .2s ease;
+  user-select: none; -webkit-user-select: none;
+}
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--muted) 40%, transparent);
+  border-radius: 5px; border: 2px solid transparent; background-clip: padding-box;
+}
+
+.hdr {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: nowrap;
+  gap: 8px; padding: 3px 10px; min-height: 32px; flex-shrink: 0;
+  background: var(--hero-bg, var(--card));
+  border-bottom: 1px solid var(--hero-border, var(--line));
+  color: var(--hero-text, var(--text));
+  z-index: 20;
+}
+.hdr-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.logo {
+  width: 22px; height: 22px; flex-shrink: 0;
+  background: var(--accent);
+  border-radius: var(--btn-radius, 4px); display: flex; align-items: center; justify-content: center;
+  font-size: 11px;
+}
+.hdr-titles { min-width: 0; }
+.hdr-title {
+  font-size: 13px; font-weight: 600; line-height: 1.2;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.hdr-sub { display: none; }
+.hdr-actions { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; flex-shrink: 0; }
+.badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--accent-soft); border: 1px solid var(--line);
+  border-radius: var(--chip-radius, 4px); padding: 2px 8px; font-size: 11px; color: var(--accent-strong);
+  font-family: var(--mono); max-width: 320px;
+}
+.badge-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--ok); flex-shrink: 0;
+  box-shadow: 0 0 7px var(--ok); animation: pls 2.2s ease-in-out infinite;
+}
+.badge.idle .badge-dot { background: var(--muted); box-shadow: none; animation: none; }
+.badge.busy .badge-dot { background: var(--accent-strong); }
+.badge.err .badge-dot { background: var(--err); box-shadow: 0 0 7px var(--err); animation: none; }
+@keyframes pls { 0%,100%{opacity:1} 50%{opacity:.45} }
+.badge span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  min-height: var(--ctrl-h, 28px);
+  border: 1px solid var(--line); border-radius: var(--btn-radius, 4px);
+  background: var(--btn-secondary-bg, rgba(255,255,255,.04)); color: var(--text);
+  padding: var(--btn-pad-y, 4px) var(--btn-pad-x, 10px);
+  font-size: 12px; font-weight: var(--btn-font-weight, 600); cursor: pointer;
+  white-space: nowrap;
+}
+.btn:hover { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }
+.btn:active { filter: brightness(0.94); }
+.btn.primary { background: var(--accent); border-color: transparent; color: #fff; }
+.btn.primary:hover { background: var(--accent-strong); color: #fff; }
+.btn.sm { min-height: 24px; padding: 2px 8px; font-size: 11px; }
+.iconbtn {
+  width: 28px; height: 28px; border: 1px solid transparent; border-radius: var(--btn-radius, 4px);
+  background: rgba(255,255,255,.04); color: var(--text); cursor: pointer;
+  font-size: 14px; display: inline-flex; align-items: center; justify-content: center;
+}
+.iconbtn:hover { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }
+
+.layout { display: flex; flex: 1 1 auto; min-height: 0; }
+.sidebar {
+  width: min(220px, 30vw); background: var(--sidebar-bg); border-right: 1px solid var(--line);
+  display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0;
+  transition: width .2s ease, background .25s ease;
+}
+.layout.side-collapsed .sidebar { width: 48px; }
+.layout.side-collapsed .sb-label,
+.layout.side-collapsed #list,
+.layout.side-collapsed #status,
+.layout.side-collapsed .scan-panel { display: none; }
+.layout.side-collapsed .sb-head { justify-content: center; padding: 10px 6px; }
+/* Keep collapse toggle visible so the sidebar can be reopened. */
+.layout.side-collapsed .sb-tools { display: flex; }
+
+.sb-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 8px 4px; gap: 6px; flex-shrink: 0;
+}
+.sb-label {
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .08em; color: var(--muted); white-space: nowrap;
+}
+.sb-tools { display: flex; align-items: center; gap: 4px; }
+
+.scan-panel {
+  margin: 0 6px 6px; border: 1px solid var(--line); border-radius: var(--card-radius, var(--r2));
+  background: var(--card); overflow: hidden; flex-shrink: 0;
+}
+.scan-panel.collapsed .scan-body { display: none; }
+.scan-h {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 5px 8px; cursor: pointer; user-select: none;
+}
+.scan-h:hover { background: rgba(255,255,255,.03); }
+.scan-h .t { font-size: 12px; font-weight: 600; }
+.scan-h .chev { color: var(--muted); font-size: 11px; transition: transform .15s; }
+.scan-panel.collapsed .scan-h .chev { transform: rotate(-90deg); }
+.scan-body { padding: 0 10px 10px; display: flex; flex-direction: column; gap: 8px; }
+.scan-opts { display: flex; flex-direction: column; gap: 5px; }
+.scan-opt {
+  display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text);
+  cursor: pointer; user-select: none; padding: 2px 0;
+}
+.scan-opt input { accent-color: var(--accent); width: 14px; height: 14px; margin: 0; flex-shrink: 0; }
+.scan-opt .hint { color: var(--muted); font-size: 10px; margin-left: auto; }
+.scan-add { display: flex; gap: 6px; }
+.scan-add input {
+  flex: 1; min-width: 0; min-height: var(--ctrl-h, 28px);
+  background: var(--field-bg, rgba(0,0,0,.25)); color: var(--text);
+  border: 1px solid var(--line); border-radius: var(--btn-radius, 4px);
+  padding: 4px 10px; font-size: 12px; outline: none;
+}
+.scan-add input:focus { border-color: var(--accent); }
+.scan-add.disabled { opacity: .45; pointer-events: none; }
+.scan-auto {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 8px; border-radius: var(--radius-sm, 4px);
+  background: rgba(0,0,0,.18); border: 1px solid var(--line);
+}
+.scan-auto label { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; margin: 0; }
+.scan-auto select {
+  min-height: 24px; background: var(--field-bg, rgba(0,0,0,.25)); color: var(--text);
+  border: 1px solid var(--line); border-radius: var(--btn-radius, 4px);
+  padding: 2px 8px; font-size: 12px; outline: none;
+}
+.chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.chips-label { font-size: 10px; color: var(--muted); width: 100%; margin-top: 2px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px;
+  border-radius: var(--chip-radius, 4px); background: rgba(255,255,255,.06); border: 1px solid var(--line);
+  font-size: 11px; color: var(--muted); font-family: var(--mono);
+}
+.chip button {
+  border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px;
+}
+.chip button:hover { color: var(--err); }
+
+#status {
+  padding: 0 10px 4px; font-size: 11px; color: var(--muted); flex-shrink: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#list { flex: 1; overflow-y: auto; padding: 0 4px 8px; min-height: 0; user-select: text; }
+
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--card-radius, var(--r2));
+  margin: 0 2px 6px; overflow: hidden;
+}
+.card.collapsed .card-body { display: none; }
+.card-h {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px; cursor: pointer; user-select: none;
+}
+.card-h:hover { background: rgba(255,255,255,.03); }
+.dev-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px var(--ok); flex-shrink: 0; }
+.card-h .names { flex: 1; min-width: 0; }
+.card-h .name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card-h .meta { font-size: 10px; color: var(--muted); font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card-h .chev { color: var(--muted); font-size: 11px; transition: transform .15s; }
+.card.collapsed .card-h .chev { transform: rotate(-90deg); }
+.card-body { padding: 0 8px 8px; display: flex; flex-direction: column; gap: 4px; }
+.board-row {
+  display: flex; align-items: center; gap: 8px; padding: 7px 8px;
+  border-radius: var(--btn-radius, 4px); background: rgba(0,0,0,.18); border: 1px solid transparent;
+}
+.board-row:hover { border-color: var(--accent); background: var(--accent-soft); }
+.board-row .nm { flex: 1; font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tag {
+  font-size: 10px; padding: 1px 6px; border-radius: 4px;
+  background: rgba(255,255,255,.08); color: var(--muted); flex-shrink: 0;
+}
+.empty-side {
+  padding: 24px 14px; text-align: center; color: var(--muted); font-size: 12px; line-height: 1.6;
+}
+
+.session {
+  flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column;
+  background: transparent;
+}
+.session-bar {
+  display: flex; align-items: center; gap: 8px; padding: 3px 10px; flex-shrink: 0;
+  border-bottom: 1px solid var(--line); background: rgba(8,14,24,.55); min-height: 28px;
+}
+.session-bar .label { font-size: 11px; font-weight: 600; color: var(--muted); }
+.session-bar .url {
+  flex: 1; min-width: 0; font-size: 11px; font-family: var(--mono); color: var(--accent-strong);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+body.session-open .session-bar .label { display: none; }
+#frame-wrap { position: relative; flex: 1; min-height: 0; background: #000; }
+#frame { width: 100%; height: 100%; border: 0; background: #fff; display: none; }
+#frame.show { display: block; }
+#empty {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 10px;
+  color: var(--muted); font-size: 13px; pointer-events: none; text-align: center; padding: 24px;
+}
+#empty.hidden { display: none; }
+#empty .big { font-size: 28px; opacity: .45; }
+
+@media (max-width: 780px) {
+  .layout { flex-direction: column; }
+  .sidebar { width: 100% !important; max-height: 42%; border-right: 0; border-bottom: 1px solid var(--line); }
+  .layout.side-collapsed .sidebar { width: 100% !important; max-height: 48px; }
+}
+</style>
+</head>
+<body>
+<header class="hdr">
+  <div class="hdr-left">
+    <div class="logo">📡</div>
+    <div class="hdr-titles">
+      <div class="hdr-title">局域网板子管理</div>
+      <div class="hdr-sub">发现可公开通道 · 嵌入访问会话</div>
+    </div>
+  </div>
+  <div class="hdr-actions">
+    <div class="badge idle" id="statusBadge"><span class="badge-dot"></span><span id="statusText">就绪</span></div>
+    <button type="button" class="btn" id="btnClear">清空</button>
+    <button type="button" class="btn primary" id="btnScan">扫描</button>
+  </div>
+</header>
+
+<div class="layout" id="layout">
+  <aside class="sidebar" id="sidebar">
+    <div class="sb-head">
+      <span class="sb-label">设备列表</span>
+      <div class="sb-tools">
+        <button type="button" class="iconbtn" id="btnToggleSide" title="折叠侧栏">‹</button>
+      </div>
+    </div>
+
+    <div class="scan-panel" id="scanPanel">
+      <div class="scan-h" id="scanToggle">
+        <span class="t">扫描范围（可多选）</span>
+        <span class="chev">▾</span>
+      </div>
+      <div class="scan-body">
+        <div class="scan-opts">
+          <label class="scan-opt"><input type="checkbox" id="optSelf" />本机<span class="hint">本机网卡 IP</span></label>
+          <label class="scan-opt"><input type="checkbox" id="optLocalLans" checked />本机所有局域网<span class="hint">各 NIC 广播</span></label>
+          <label class="scan-opt"><input type="checkbox" id="optSubnets" />指定局域网</label>
+          <label class="scan-opt"><input type="checkbox" id="optHosts" />指定主机列表</label>
+        </div>
+        <div class="scan-add" id="rowSubnet">
+          <input id="subnetInput" type="text" placeholder="网段 如 192.168.10.0/24" />
+          <button type="button" class="btn sm" id="btnAddSubnet">添加</button>
+        </div>
+        <div class="chips" id="subnetChips"></div>
+        <div class="scan-add" id="rowHost">
+          <input id="hostInput" type="text" placeholder="主机 如 192.168.1.54" />
+          <button type="button" class="btn sm" id="btnAddHost">添加</button>
+        </div>
+        <div class="chips" id="hostChips"></div>
+        <div class="scan-auto">
+          <label><input type="checkbox" id="optAuto" />定时刷新</label>
+          <select id="autoInterval" title="刷新间隔">
+            <option value="5">每 5 秒</option>
+            <option value="10" selected>每 10 秒</option>
+            <option value="30">每 30 秒</option>
+            <option value="60">每 60 秒</option>
+            <option value="120">每 2 分钟</option>
+          </select>
+        </div>
+        <button type="button" class="btn sm primary" id="btnScan2" style="align-self:stretch">按所选范围扫描</button>
+      </div>
+    </div>
+
+    <div id="status">勾选范围后点「扫描」</div>
+    <div id="list"></div>
+  </aside>
+
+  <section class="session">
+    <div class="session-bar">
+      <span class="label">会话</span>
+      <span class="url" id="sessionUrl">未打开</span>
+      <button type="button" class="btn sm" id="btnCloseSession" style="display:none">关闭会话</button>
+    </div>
+    <div id="frame-wrap">
+      <div id="empty">
+        <div class="big">▣</div>
+        <div>从左侧打开板子后，会话窗口将显示在这里</div>
+      </div>
+      <iframe id="frame" title="board"></iframe>
+    </div>
+  </section>
+</div>
+
+<script>
+const listEl = document.getElementById('list');
+const statusEl = document.getElementById('status');
+const statusText = document.getElementById('statusText');
+const statusBadge = document.getElementById('statusBadge');
+const frame = document.getElementById('frame');
+const empty = document.getElementById('empty');
+const chipsEl = document.getElementById('subnetChips');
+const hostChipsEl = document.getElementById('hostChips');
+const sessionUrl = document.getElementById('sessionUrl');
+const btnCloseSession = document.getElementById('btnCloseSession');
+const layout = document.getElementById('layout');
+const scanPanel = document.getElementById('scanPanel');
+const optSelf = document.getElementById('optSelf');
+const optLocalLans = document.getElementById('optLocalLans');
+const optSubnets = document.getElementById('optSubnets');
+const optHosts = document.getElementById('optHosts');
+const optAuto = document.getElementById('optAuto');
+const autoInterval = document.getElementById('autoInterval');
+
+let devices = [];
+let subnets = [];
+let hosts = [];
+let scanning = false;
+let autoTimer = null;
+try {
+  subnets = JSON.parse(localStorage.getItem('wm_subnets') || '[]');
+  if (!Array.isArray(subnets)) subnets = [];
+  hosts = JSON.parse(localStorage.getItem('wm_hosts') || '[]');
+  if (!Array.isArray(hosts)) hosts = [];
+  if (localStorage.getItem('wm_side_collapsed') === '1') layout.classList.add('side-collapsed');
+  if (localStorage.getItem('wm_scan_open') === '0') scanPanel.classList.add('collapsed');
+  var so = JSON.parse(localStorage.getItem('wm_scan_opts') || '{}');
+  if (so && typeof so === 'object') {
+    if ('self' in so) optSelf.checked = !!so.self;
+    if ('local' in so) optLocalLans.checked = !!so.local;
+    if ('subnets' in so) optSubnets.checked = !!so.subnets;
+    if ('hosts' in so) optHosts.checked = !!so.hosts;
+    if ('auto' in so) optAuto.checked = !!so.auto;
+    if (so.interval) autoInterval.value = String(so.interval);
+  }
+} catch (e) { subnets = []; hosts = []; }
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+    return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c];
+  });
+}
+
+function setStatus(msg, kind) {
+  statusEl.textContent = msg;
+  statusText.textContent = msg;
+  statusBadge.className = 'badge ' + (kind || 'idle');
+}
+
+function saveScanOpts() {
+  try {
+    localStorage.setItem('wm_scan_opts', JSON.stringify({
+      self: optSelf.checked,
+      local: optLocalLans.checked,
+      subnets: optSubnets.checked,
+      hosts: optHosts.checked,
+      auto: optAuto.checked,
+      interval: Number(autoInterval.value) || 10
+    }));
+  } catch (e) {}
+  document.getElementById('rowSubnet').classList.toggle('disabled', !optSubnets.checked);
+  document.getElementById('rowHost').classList.toggle('disabled', !optHosts.checked);
+  setupAutoRefresh();
+}
+
+function saveSubnets() {
+  localStorage.setItem('wm_subnets', JSON.stringify(subnets));
+  renderChips();
+}
+
+function saveHosts() {
+  localStorage.setItem('wm_hosts', JSON.stringify(hosts));
+  renderHostChips();
+}
+
+function renderChips() {
+  if (!subnets.length) {
+    chipsEl.innerHTML = '<span class="chips-label">指定网段：暂无</span>';
+    return;
+  }
+  chipsEl.innerHTML = '<span class="chips-label">指定网段</span>' + subnets.map((s, i) =>
+    `<span class="chip">${esc(s)} <button type="button" data-rm-subnet="${i}" title="移除">×</button></span>`
+  ).join('');
+}
+
+function renderHostChips() {
+  if (!hosts.length) {
+    hostChipsEl.innerHTML = '<span class="chips-label">指定主机：暂无</span>';
+    return;
+  }
+  hostChipsEl.innerHTML = '<span class="chips-label">指定主机</span>' + hosts.map((s, i) =>
+    `<span class="chip">${esc(s)} <button type="button" data-rm-host="${i}" title="移除">×</button></span>`
+  ).join('');
+}
+
+function render() {
+  if (!devices.length) {
+    listEl.innerHTML = '<div class="empty-side">暂无设备<br>勾选范围后扫描</div>';
+    return;
+  }
+  listEl.innerHTML = devices.map((d, di) => {
+    const boards = (d.boards || []).map((b, bi) => `
+      <div class="board-row">
+        <span class="nm">${esc(b.name)} <span class="tag">${esc(b.type || '?')}</span></span>
+        <button type="button" class="btn sm primary" data-open="${di}:${bi}">打开</button>
+      </div>`).join('');
+    const hostPort = `${d.host || '?'}:${d.http_port || '?'}`;
+    const title = (d.alias && String(d.alias).trim()) ? String(d.alias).trim() : hostPort;
+    const metaParts = [];
+    if (d.alias && String(d.alias).trim()) metaParts.push(hostPort);
+    if (d.version) metaParts.push('v' + d.version);
+    const meta = metaParts.join(' · ');
+    return `<div class="card" data-dev="${di}">
+      <div class="card-h" data-toggle-dev="${di}">
+        <span class="dev-dot"></span>
+        <div class="names"><div class="name">${esc(title)}</div>${meta ? `<div class="meta">${esc(meta)}</div>` : ''}</div>
+        <span class="chev">▾</span>
+      </div>
+      <div class="card-body">${boards || '<div class="empty-side" style="padding:8px">无已公开板子</div>'}</div>
+    </div>`;
+  }).join('');
+}
+
+function clearDeviceTheme() {
+  document.querySelectorAll('link[data-wm-device-theme]').forEach(function(el) { el.remove(); });
+  document.documentElement.removeAttribute('data-theme');
+}
+
+function loadThemeStylesheet(base) {
+  return new Promise(function(resolve) {
+    var link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = base + '/webui/themes.css';
+    link.setAttribute('data-wm-device-theme', '1');
+    var done = false;
+    function finish() {
+      if (done) return;
+      done = true;
+      resolve();
+    }
+    link.onload = finish;
+    link.onerror = finish;
+    document.head.appendChild(link);
+    setTimeout(finish, 1200);
+  });
+}
+
+async function syncDeviceTheme(dev) {
+  clearDeviceTheme();
+  if (!dev || !dev.host || !dev.http_port) return;
+  var base = 'http://' + dev.host + ':' + dev.http_port;
+  var theme = dev.theme || 'aurora';
+  try {
+    var r = await fetch(base + '/ui_settings');
+    if (r.ok) {
+      var data = await r.json();
+      if (data && data.theme) theme = data.theme;
+      if (dev) dev.theme = theme;
+    }
+  } catch (e) { /* discovery theme / default */ }
+  await loadThemeStylesheet(base);
+  document.documentElement.setAttribute('data-theme', theme);
+}
+
+function openBoard(dev, board) {
+  var q = '';
+  if (board && board.name) {
+    q = '?' + ((board.type === 'ssh') ? 'link=' : 'board=') + encodeURIComponent(board.name);
+  }
+  const url = 'http://' + dev.host + ':' + dev.http_port + '/' + q;
+  frame.src = url;
+  frame.classList.add('show');
+  empty.classList.add('hidden');
+  document.body.classList.add('session-open');
+  sessionUrl.textContent = board ? (board.name + ' · ' + dev.host + ':' + dev.http_port) : url;
+  btnCloseSession.style.display = '';
+  setStatus('已打开 ' + (board ? board.name + ' @ ' : '') + dev.host + ':' + dev.http_port, 'ok');
+  statusBadge.className = 'badge';
+  if (!layout.classList.contains('side-collapsed')) {
+    layout.classList.add('side-collapsed');
+    document.getElementById('btnToggleSide').textContent = '›';
+  }
+  syncDeviceTheme(dev);
+}
+
+function closeSession() {
+  frame.src = 'about:blank';
+  frame.classList.remove('show');
+  empty.classList.remove('hidden');
+  document.body.classList.remove('session-open');
+  sessionUrl.textContent = '未打开';
+  btnCloseSession.style.display = 'none';
+  clearDeviceTheme();
+}
+
+function mergeDevices(arr) {
+  const map = new Map(devices.map(d => [d.host + ':' + d.http_port, d]));
+  for (const d of (arr || [])) map.set(d.host + ':' + d.http_port, d);
+  devices = Array.from(map.values()).sort((a, b) => String(a.host).localeCompare(String(b.host)));
+  render();
+}
+
+function replaceDevices(arr) {
+  devices = (arr || []).slice().sort((a, b) => String(a.host).localeCompare(String(b.host)));
+  render();
+}
+
+async function doScan(targets, label, replace) {
+  if (scanning) return;
+  scanning = true;
+  setStatus(label || '正在扫描…', 'busy');
+  try {
+    if (typeof window.discover !== 'function') {
+      throw new Error('discover 未就绪（请用 windows_manager.exe 打开）');
+    }
+    const raw = await window.discover(1500, targets);
+    const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (replace) replaceDevices(arr);
+    else mergeDevices(arr);
+    var suffix = optAuto.checked ? ' · 自动刷新中' : '';
+    setStatus('扫描完成 · ' + devices.length + ' 台设备' + suffix, devices.length ? '' : 'idle');
+  } catch (err) {
+    setStatus('扫描失败: ' + (err && err.message ? err.message : err), 'err');
+  } finally {
+    scanning = false;
+  }
+}
+
+function setupAutoRefresh() {
+  if (autoTimer) {
+    clearInterval(autoTimer);
+    autoTimer = null;
+  }
+  if (!optAuto.checked) return;
+  var sec = Number(autoInterval.value) || 10;
+  if (sec < 5) sec = 5;
+  autoTimer = setInterval(function() {
+    if (scanning) return;
+    try {
+      var s = buildTargets();
+      doScan(s.targets, '自动刷新…', true);
+    } catch (err) {
+      /* keep timer; show once */
+      setStatus(err && err.message ? err.message : String(err), 'err');
+    }
+  }, sec * 1000);
+}
+
+/* Direct handlers — WebView2 set_html can target text nodes; avoid fragile instanceof checks. */
+listEl.onclick = function(e) {
+  var el = e.target;
+  if (el && el.nodeType === 3) el = el.parentElement;
+  if (!el || !el.closest) return;
+  var tog = el.closest('[data-toggle-dev]');
+  if (tog) {
+    var card = tog.closest('.card');
+    if (card) card.classList.toggle('collapsed');
+    return;
+  }
+  var btn = el.closest('[data-open]');
+  if (!btn) return;
+  var parts = btn.getAttribute('data-open').split(':');
+  var di = Number(parts[0]), bi = Number(parts[1]);
+  var d = devices[di];
+  if (!d) return;
+  openBoard(d, (d.boards || [])[bi]);
+};
+
+chipsEl.onclick = function(e) {
+  var el = e.target;
+  if (el && el.nodeType === 3) el = el.parentElement;
+  if (!el || !el.closest) return;
+  var btn = el.closest('[data-rm-subnet]');
+  if (!btn) return;
+  subnets.splice(Number(btn.getAttribute('data-rm-subnet')), 1);
+  saveSubnets();
+};
+
+hostChipsEl.onclick = function(e) {
+  var el = e.target;
+  if (el && el.nodeType === 3) el = el.parentElement;
+  if (!el || !el.closest) return;
+  var btn = el.closest('[data-rm-host]');
+  if (!btn) return;
+  hosts.splice(Number(btn.getAttribute('data-rm-host')), 1);
+  saveHosts();
+};
+
+document.getElementById('scanToggle').onclick = function() {
+  scanPanel.classList.toggle('collapsed');
+  try {
+    localStorage.setItem('wm_scan_open', scanPanel.classList.contains('collapsed') ? '0' : '1');
+  } catch (e) {}
+};
+
+document.getElementById('btnToggleSide').onclick = function() {
+  layout.classList.toggle('side-collapsed');
+  var collapsed = layout.classList.contains('side-collapsed');
+  try { localStorage.setItem('wm_side_collapsed', collapsed ? '1' : '0'); } catch (e) {}
+  document.getElementById('btnToggleSide').textContent = collapsed ? '›' : '‹';
+};
+document.getElementById('btnToggleSide').textContent =
+  layout.classList.contains('side-collapsed') ? '›' : '‹';
+
+document.getElementById('btnClear').onclick = function() {
+  devices = [];
+  render();
+  closeSession();
+  setStatus('列表已清空', 'idle');
+};
+
+[optSelf, optLocalLans, optSubnets, optHosts].forEach(function(el) {
+  el.onchange = saveScanOpts;
+});
+optAuto.onchange = saveScanOpts;
+autoInterval.onchange = saveScanOpts;
+
+document.getElementById('btnAddSubnet').onclick = function() {
+  var v = (document.getElementById('subnetInput').value || '').trim();
+  if (!v) return;
+  if (subnets.indexOf(v) < 0) subnets.push(v);
+  document.getElementById('subnetInput').value = '';
+  optSubnets.checked = true;
+  saveScanOpts();
+  saveSubnets();
+  scanPanel.classList.remove('collapsed');
+};
+
+document.getElementById('btnAddHost').onclick = function() {
+  var v = (document.getElementById('hostInput').value || '').trim();
+  if (!v) return;
+  if (hosts.indexOf(v) < 0) hosts.push(v);
+  document.getElementById('hostInput').value = '';
+  optHosts.checked = true;
+  saveScanOpts();
+  saveHosts();
+  scanPanel.classList.remove('collapsed');
+};
+
+function buildTargets() {
+  var targets = [];
+  var parts = [];
+  if (optSelf.checked) { targets.push('self'); parts.push('本机'); }
+  if (optLocalLans.checked) { targets.push('local'); parts.push('本机局域网'); }
+  if (optSubnets.checked) {
+    if (!subnets.length) throw new Error('已勾选「指定局域网」，请先添加网段');
+    targets = targets.concat(subnets);
+    parts.push('网段×' + subnets.length);
+  }
+  if (optHosts.checked) {
+    if (!hosts.length) throw new Error('已勾选「指定主机」，请先添加主机');
+    targets = targets.concat(hosts);
+    parts.push('主机×' + hosts.length);
+  }
+  if (!targets.length) throw new Error('请至少勾选一种扫描范围');
+  return { targets: targets, label: '正在扫描：' + parts.join(' + ') + '…' };
+}
+
+function scanSelected() {
+  try {
+    var s = buildTargets();
+    doScan(s.targets, s.label, false);
+  } catch (err) {
+    setStatus(err && err.message ? err.message : String(err), 'err');
+  }
+}
+document.getElementById('btnScan').onclick = scanSelected;
+document.getElementById('btnScan2').onclick = scanSelected;
+
+btnCloseSession.onclick = function() {
+  closeSession();
+  setStatus('会话已关闭', 'idle');
+};
+
+saveScanOpts();
+renderChips();
+renderHostChips();
+render();
+setStatus(optAuto.checked ? '就绪 · 定时刷新已开启' : '就绪 · 可多选范围后扫描', 'idle');
+</script>
+</body>
+</html>
