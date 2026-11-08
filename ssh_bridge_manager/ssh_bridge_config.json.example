@@ -1,0 +1,184 @@
+{
+    "eadk": {
+        "tool": "ssh-bridge"
+    },
+    "default": {
+        "username": "root",
+        "password": "",
+        "buffer_size": 1048576,
+        "log_enabled": true,
+        "work_dir": "",
+        "log_dir": "",
+        "http_port": 18081,
+        "alias": ""
+    },
+    "inbound_ssh": {
+        "enable": true,
+        "port": 2222
+    },
+    "tftp": {
+        "enable": false,
+        "port": 69,
+        "root": "",
+        "bind_ip": "",
+        "create_board_dirs": true,
+        "allow_write": true
+    },
+    "nfs": {
+        "enable": false,
+        "export_alias": "/share",
+        "uid": 0,
+        "gid": 0
+    },
+    "tunnel": {
+        "server_addr": "sshbridge.online",
+        "server_port": 7321,
+        "token": "sdafsdafdsnvsdafsdfsdafsdavsavso23oy47r32trvnasbhguyfgbfnahuinhyvgrhn",
+        "dashboard_port": 7322,
+        "dashboard_user": "admin",
+        "dashboard_password": "fsdafsdfsdafsdafsdfsdafsdafcvsjklwjvmi34u8384tosfhnvet8yt7834nygetuyeritb3nuygbn",
+        "local_host": "127.0.0.1",
+        "local_port": 0,
+        "http_port": 18087,
+        "remote_port": 0,
+        "last_remote_port": 0,
+        "inbound_ssh_remote_port": 0,
+        "last_inbound_ssh_remote_port": 0,
+        "proxy_name": "",
+        "map_inbound_ssh": false,
+        "exe_path": ""
+    },
+    "relays": {
+        "24V": {
+            "enable": true,
+            "windows_port": "COM35",
+            "linux_port": "",
+            "relay_channels": 2,
+            "baudrate": 9600,
+            "io_inverted": true,
+            "post_write_delay_ms": 100
+        },
+        "MASKROM": {
+            "enable": true,
+            "windows_port": "COM36",
+            "linux_port": "",
+            "relay_channels": 1,
+            "baudrate": 9600,
+            "io_inverted": false,
+            "post_write_delay_ms": 100
+        }
+    },
+    "boards": {
+        "board-win": {
+            "enable": true,
+            "discoverable": false,
+            "password": "",
+            "target_username": "",
+            "target_password": "",
+            "serial_device": "COM3",
+            "baudrate": 115200,
+            "databits": 8,
+            "parity": "none",
+            "stopbits": "1",
+            "flowcontrol": "none",
+            "dtr": true,
+            "rts": true,
+            "line_ending": "crlf",
+            "encoding": "utf-8",
+            "auto_open": true,
+            "timestamp": true,
+            "buttons": [
+                {
+                    "id": "power_on",
+                    "label": "上电",
+                    "enable": true,
+                    "backend": "commands",
+                    "run": "host",
+                    "commands": ["echo power_on"],
+                    "delay_ms": 0
+                },
+                {
+                    "id": "power_off",
+                    "label": "下电",
+                    "enable": false,
+                    "backend": "relay",
+                    "relay": "24V",
+                    "channel": 1,
+                    "mode": "hold_off",
+                    "hold_seconds": 0,
+                    "polarity_inverted": false
+                },
+                {
+                    "id": "reboot",
+                    "label": "重启",
+                    "enable": true,
+                    "backend": "relay",
+                    "relay": "24V",
+                    "channel": 2,
+                    "mode": "pulse",
+                    "hold_seconds": 1.0,
+                    "polarity_inverted": false
+                },
+                {
+                    "id": "upgrade",
+                    "label": "升级模式",
+                    "enable": true,
+                    "backend": "script",
+                    "script": "# RK3588 进 Maskrom / 升级模式示例\nrelay 24V ch 1 off\nmsleep 500\nrelay MASKROM ch 1 on\nmsleep 500\nrelay 24V ch 1 on\nmsleep 800\nrelay MASKROM ch 1 off\n"
+                }
+            ]
+        },
+        "board-linux": {
+            "enable": false,
+            "discoverable": false,
+            "password": "",
+            "serial_device": "/dev/ttyUSB0",
+            "baudrate": 1500000,
+            "databits": 8,
+            "parity": "none",
+            "stopbits": "1",
+            "flowcontrol": "none",
+            "dtr": true,
+            "rts": true,
+            "line_ending": "lf",
+            "encoding": "utf-8",
+            "auto_open": true,
+            "timestamp": true,
+            "buttons": []
+        }
+    },
+    "ssh": {
+        "yocto-build": {
+            "enable": true,
+            "discoverable": false,
+            "password": "",
+            "target_host": "192.168.1.10",
+            "target_port": 22,
+            "target_username": "root",
+            "target_password": "changeme",
+            "timestamp": true,
+            "buttons": [
+                {
+                    "id": "reboot",
+                    "label": "重启",
+                    "enable": true,
+                    "backend": "commands",
+                    "run": "channel",
+                    "commands": ["reboot"],
+                    "delay_ms": 0
+                }
+            ]
+        },
+        "docker-host": {
+            "enable": false,
+            "discoverable": false,
+            "password": "",
+            "target_host": "10.0.0.20",
+            "target_port": 22,
+            "target_username": "user",
+            "target_password": "changeme",
+            "timestamp": true,
+            "buttons": []
+        }
+    }
+}

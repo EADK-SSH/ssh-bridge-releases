@@ -1,0 +1,28 @@
+# SSH Bridge Manager — Linux binaries (`x86_64`)
+
+**Branch: `linux_x86_64`.** Binary downloads only. Source is private.
+
+| Tool | Path |
+|------|------|
+| Manager | [`ssh_bridge_manager/`](./ssh_bridge_manager/) |
+
+## Get the binaries
+
+### Option A — GitHub Releases (zip)
+
+→ [Releases](https://github.com/EADK-SSH/ssh-bridge-releases/releases)
+
+- `ssh_bridge_manager-linux-<VERSION>.zip`
+
+### Option B — git clone this branch
+
+```bash
+git clone -b linux_x86_64 https://github.com/EADK-SSH/ssh-bridge-releases.git
+cd ssh-bridge-releases/ssh_bridge_manager
+```
+
+Run `./run.sh` or `./ssh_bridge_manager`.
+
+Latest build on this branch: **`20261108-003248`** (valid ~180 days from compile).
+
+Contact: yanggan2015@foxmail.com
