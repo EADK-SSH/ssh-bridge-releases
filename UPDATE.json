@@ -1,10 +1,10 @@
 {
-  "version": "20261109-024611",
+  "version": "20261109-051014",
   "platform": "windows",
   "arch": "x86_64",
   "branch": "windows_x86_64",
-  "zip": "ssh_bridge_manager-windows-x86_64-20261109-024611.zip",
-  "zip_legacy": "ssh_bridge_manager-windows-20261109-024611.zip",
-  "url": "https://github.com/EADK-SSH/ssh-bridge-releases/releases/download/v20261109-024611/ssh_bridge_manager-windows-x86_64-20261109-024611.zip",
-  "url_legacy": "https://github.com/EADK-SSH/ssh-bridge-releases/releases/download/v20261109-024611/ssh_bridge_manager-windows-20261109-024611.zip"
+  "zip": "ssh_bridge_manager-windows-x86_64-20261109-051014.zip",
+  "zip_legacy": "ssh_bridge_manager-windows-20261109-051014.zip",
+  "url": "https://github.com/EADK-SSH/ssh-bridge-releases/releases/download/v20261109-051014/ssh_bridge_manager-windows-x86_64-20261109-051014.zip",
+  "url_legacy": "https://github.com/EADK-SSH/ssh-bridge-releases/releases/download/v20261109-051014/ssh_bridge_manager-windows-20261109-051014.zip"
 }
