@@ -1,0 +1,10 @@
+{
+  "version": "20261109-024857",
+  "platform": "linux",
+  "arch": "x86_64",
+  "branch": "linux_x86_64",
+  "zip": "ssh_bridge_manager-linux-x86_64-20261109-024857.zip",
+  "zip_legacy": "ssh_bridge_manager-linux-20261109-024857.zip",
+  "url": "https://github.com/EADK-SSH/ssh-bridge-releases/releases/download/v20261109-024857/ssh_bridge_manager-linux-x86_64-20261109-024857.zip",
+  "url_legacy": "https://github.com/EADK-SSH/ssh-bridge-releases/releases/download/v20261109-024857/ssh_bridge_manager-linux-20261109-024857.zip"
+}
