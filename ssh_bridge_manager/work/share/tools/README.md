@@ -12,7 +12,7 @@
 
 ```bash
 # 下载（Win/Linux 同一脚本）
-curl -sS -OJ "http://HOST:18071/tftp/download?path=tools/eadk_board.py"
+curl -sS -OJ "http://HOST:18071/share/tools/eadk_board.py"
 
 # 发现局域网主机/板卡
 python eadk_board.py discover

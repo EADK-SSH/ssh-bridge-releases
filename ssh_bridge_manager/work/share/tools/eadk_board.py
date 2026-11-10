@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """EADK 板卡统一 CLI（Win/Linux，仅标准库）。封装桥 Agent HTTP / 分片上传 / 局域网发现。
-手册: GET $BASE/tftp/download?path=tools/eadk_board.md
+手册: GET $BASE/share/tools/eadk_board.md
 用法: python eadk_board.py [-b 通道] [-B base] [-t 秒] [-T] [-p PAT] <子命令> ...
 """
 from __future__ import annotations
@@ -35,11 +35,13 @@ STABLE_NEED = 6
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07")
 LAN_PORTS = [(18071, "EADK1"), (38472, "SSHBM1")]
 FEAT_ORDER = [
-    "status", "log", "clear", "cmd", "keys", "ctrlc", "write", "timestamp", "reconnect",
+    "status", "log", "clear", "cmd", "send", "keys", "ctrlc", "write", "timestamp", "reconnect",
     "serial", "reboot", "power_on", "power_off", "soft-reboot", "uboot", "bootlog",
     "probe", "health", "state", "login", "ensure", "run", "exec", "download", "help-url",
-    "scan", "discover", "put", "feedback",
+    "action", "scan", "discover", "put", "feedback",
 ]
+# 常见板控按钮（有则 +，无则不出现）；其它 /actions id 同样可调
+KNOWN_ACTION_IDS = ("power_on", "power_off", "reboot", "enter_uboot", "upgrade", "enter_upgrade_mode")
 
 
 class Die(Exception):
@@ -248,6 +250,7 @@ class Client:
         self.want_ts = want_ts
         self.done_pat = done_pat
         self.as_json = as_json
+        self.send_wait = 1.0  # send 子命令默认等待秒
         self.login_user = user or os.environ.get("EADK_USER", "")
         self.login_pass = passwd if passwd is not None else os.environ.get("EADK_PASS", "")
         self.ch_name = ""
@@ -434,11 +437,14 @@ class Client:
 
     def feature_enabled(self, f: str) -> bool:
         always = {
-            "list", "status", "log", "clear", "cmd", "keys", "ctrlc", "write", "timestamp",
+            "list", "status", "log", "clear", "cmd", "send", "keys", "ctrlc", "write", "timestamp",
             "reconnect", "help-url", "probe", "health", "state", "login", "ensure", "run",
-            "download", "exec", "scan", "feedback", "suggest", "bug",
+            "download", "exec", "action", "scan", "feedback", "suggest", "bug",
         }
         if f in always:
+            return True
+        # 板控按钮：有 id 就能调（enter_uboot / upgrade / enter_upgrade_mode / 自定义…）
+        if f in self.action_ids:
             return True
         if f == "serial":
             return self.ch_type == "serial"
@@ -451,6 +457,9 @@ class Client:
         if f == "soft-reboot":
             return self.has_soft_reboot
         if f == "uboot":
+            # 有 enter_uboot 按钮，或可重启的 serial
+            if "enter_uboot" in self.action_ids:
+                return True
             return (self.has_reboot or self.has_soft_reboot) and self.ch_type == "serial"
         if f == "bootlog":
             return self.has_reboot or self.has_soft_reboot
@@ -461,12 +470,12 @@ class Client:
             return "ok"
         if f == "serial":
             return "仅 serial 通道；当前是 ssh，键用 link"
-        if f in ("reboot", "power_on", "power_off"):
-            return f"GET /actions 无按钮 id={f}；可用 soft-reboot 或先配继电器按钮"
+        if f in ("reboot", "power_on", "power_off") or f in KNOWN_ACTION_IDS:
+            return f"GET /actions 无按钮 id={f}"
         if f == "uboot":
             if self.ch_type != "serial":
                 return "uboot 仅 serial；ssh 通道不支持抢 U-Boot"
-            return "需要 reboot 按钮或 soft-reboot"
+            return "需要 enter_uboot 按钮，或 reboot/soft-reboot"
         if f == "bootlog":
             return "需要 reboot 按钮或 soft-reboot"
         return "本通道不支持"
@@ -479,7 +488,11 @@ class Client:
             )
 
     def feats_map(self) -> Dict[str, bool]:
-        return {f: self.feature_enabled(f) for f in FEAT_ORDER if f not in ("scan", "feedback", "suggest", "bug")}
+        skip = {"scan", "feedback", "suggest", "bug", "discover", "put"}
+        m = {f: self.feature_enabled(f) for f in FEAT_ORDER if f not in skip}
+        for aid in self.action_ids:
+            m[aid] = True
+        return m
 
     def powered_label(self, st: str) -> str:
         if self.ch_type in ("ssh", "ssh-link"):
@@ -642,13 +655,19 @@ class Client:
               f"int={snap['uboot_profile']['interval']} mark={snap['uboot_profile']['mark']}")
         print(f"登录默认: {snap['login_user']}/****")
         print("支持功能（+ 可调 / - 勿调；不同板能力不同，以本表为准）:")
+        shown = set()
         for f in FEAT_ORDER:
-            if f in ("scan", "feedback", "suggest", "bug"):
+            if f in ("scan", "feedback", "suggest", "bug", "discover", "put"):
                 continue
+            shown.add(f)
             ok = self.feature_enabled(f)
             mark = "+" if ok else "-"
             extra = "" if ok else f"  # {self.feature_reason(f)}"
             print(f"  {mark} {f}{extra}")
+        for aid in self.action_ids:
+            if aid in shown:
+                continue
+            print(f"  + {aid}  # 板控按钮 POST /action")
 
     def cmd_status(self) -> None:
         self.load_channel()
@@ -672,10 +691,11 @@ class Client:
         self.api_post("/log/clear", self.ch_body())
 
     def cmd_keys(self, char: str, dur: float = 7.0, interval: float = 0.1) -> None:
+        """char/keys 可为序列：字面字节 + <ctrl+c> 等，按 interval 轮询 duration 秒。"""
         self.load_channel()
-        # send_keys may take duration seconds
-        self.api_post("/send_keys", self.ch_body(char=char, duration=dur, interval=interval),
-                      timeout=max(120.0, dur + 30))
+        # Prefer keys= for multi-token sequences; char= kept for compatibility.
+        body = self.ch_body(keys=char, char=char, duration=dur, interval=interval)
+        self.api_post("/send_keys", body, timeout=max(120.0, dur + 30))
 
     def cmd_ctrlc(self) -> None:
         self.cmd_keys("<ctrl+c>", 2.0, 0.1)
@@ -709,14 +729,50 @@ class Client:
             raise Die("serial open|close")
 
     def cmd_action(self, aid: str) -> None:
+        """调用板上真实按钮 id（GET /actions 里有的才能调）。"""
         self.load_channel()
-        self.require_feat(aid)
+        aid = (aid or "").strip()
+        if not aid:
+            raise Die("action <id>  例: action enter_uboot")
+        if aid not in self.action_ids:
+            have = ",".join(self.action_ids) or "（无）"
+            raise Die(f"通道 {self.ch_name} 无按钮 id={aid}；当前按钮: {have}")
         self.api_post("/action", self.ch_body(id=aid))
+        print(f"action_ok id={aid}")
 
     def cmd_soft_reboot(self) -> None:
         self.load_channel()
         self.require_feat("soft-reboot")
         self.raw_command("reboot")
+
+    def cmd_send(self, cmdline: str, wait_sec: Optional[float] = None) -> None:
+        """最原始下发：POST /command → sleep N 秒 → 返回新增日志。
+        不依赖 shell marker，U-Boot / 无 shell 环境也可用。
+        """
+        self.require_connected()
+        wait = self.send_wait if wait_sec is None else float(wait_sec)
+        if wait < 0:
+            raise Die("send 等待秒数须 >= 0")
+        before = self.fetch_log()
+        before_n = len(before)
+        self.raw_command(cmdline)
+        if wait > 0:
+            time.sleep(wait)
+        after = self.fetch_log()
+        if len(after) >= before_n and after[:before_n] == before:
+            delta = after[before_n:]
+        else:
+            # 日志被 clear/截断时退回全文尾部
+            delta = after[-8192:] if len(after) > 8192 else after
+        text = delta.replace("\r", "")
+        if self.as_json:
+            print(json.dumps({
+                "board": self.ch_name, "command": cmdline, "wait": wait, "output": text,
+            }, ensure_ascii=False, indent=2))
+        else:
+            sys.stdout.write(text)
+            if text and not text.endswith("\n"):
+                sys.stdout.write("\n")
 
     def extract_after_echo_marker(self, log: str, marker: str) -> str:
         clean = strip_ansi(log)
@@ -919,22 +975,15 @@ class Client:
             raise Die("feedback <kind> <陈述...>  例: feedback bug 串口无回显")
         if not text:
             raise Die("反馈陈述不能为空")
-        # normalize kind aliases
         kind_map = {
             "bug": "bug", "缺陷": "bug", "issue": "bug",
             "建议": "建议", "suggest": "建议", "suggestion": "建议", "enhancement": "建议",
             "功能": "功能", "feature": "功能", "feat": "功能",
         }
         kind_norm = kind_map.get(kind.lower(), kind)
-        host_name = host or self.board or local_host_name()
-        # if -b pointed at a real channel, prefer it
-        try:
-            if self.board:
-                self.load_channel()
-                host_name = host or self.ch_name or host_name
-        except Die:
-            pass
-        payload_text = f"[{host_name}][问题属性：{kind_norm}] {text}"
+        # 只用本机名（可用 EADK_HOST 覆盖）；不用板名
+        host_name = (host or local_host_name()).strip() or "unknown-host"
+        payload_text = f"[{host_name}][{kind_norm}] {text}"
         hook = DEFAULT_FEEDBACK_HOOK
         if not hook:
             raise Die("未配置反馈 Webhook（EADK_FEEDBACK_HOOK / FEISHU_HOOK）")
@@ -944,7 +993,6 @@ class Client:
         if isinstance(resp, dict):
             code = resp.get("StatusCode", resp.get("code", 0))
             if code not in (0, "0", None) and resp.get("StatusMessage") not in (None, "success"):
-                # Feishu success is StatusCode=0
                 if code not in (0, 0.0):
                     ok = False
         if not ok:
@@ -1105,6 +1153,11 @@ class Client:
         self.load_channel()
         self.require_feat("uboot")
         self.require_connected()
+        # 板上有 enter_uboot 按钮则直接调 action（不自行猜抢键流程）
+        if "enter_uboot" in self.action_ids:
+            self.api_post("/action", self.ch_body(id="enter_uboot"))
+            print("action_ok id=enter_uboot")
+            return
         self.ensure_powered("any")
         wait_s = self.reboot_wait_sec()
         self.cmd_timestamp("on" if self.want_ts else "off")
@@ -1252,13 +1305,25 @@ HELP_TOPICS = {
            "      eadk_board.py -B http://10.168.21.236:18081 -b ok3568 log chars 4000",
     "clear": "clear — 清空日志\n"
              "  例: eadk_board.py -B http://10.168.21.236:18081 -b ok3568 clear",
-    "cmd": "cmd <命令> — 已在 shell 时阻塞执行\n"
+    "cmd": "cmd <命令> — 已在 shell 时阻塞执行（等 echo 标记）\n"
+           "  流程: POST /command「cmd; echo end_…」→ 轮询 GET /log 直到标记\n"
            "  例: eadk_board.py -B http://10.168.21.236:18081 -b ok3568 cmd 'ls /'",
-    "run": "run <命令> — ensure + cmd（日常首选）\n"
+    "send": "send <命令> — 原始下发（U-Boot / 非 shell 也可用）\n"
+            "  流程: POST /command → sleep N 秒（默认 1，-w 可改）→ GET /log 增量\n"
+            "  例: eadk_board.py -b zk-hi3095 send 'printenv'\n"
+            "      eadk_board.py -b zk-hi3095 -w 2 send 'help'\n"
+            "      eadk_board.py -b zk-hi3095 -w 0.5 send 'version'",
+    "run": "run <命令> — ensure + cmd（日常 shell 首选）\n"
+           "  流程: ensure(可 power_on/login) → 同 cmd\n"
            "  例: eadk_board.py -B http://10.168.21.236:18081 -b ok3568 run 'uname -a'\n"
            "      eadk_board.py -B http://10.168.21.236:18081 -b ok3568 -t 120 run 'make -j4'",
     "exec": "exec <命令> — 同 cmd；优先 POST /agent/exec\n"
             "  例: eadk_board.py -B http://10.168.21.236:18081 -b ok3568 exec 'hostname'",
+    "action": "action <id> — 调用板上真实按钮（GET /actions 有的 id）\n"
+              "  常见: power_on / power_off / reboot / enter_uboot / upgrade / enter_upgrade_mode\n"
+              "  也可直接: eadk_board.py -b NAME enter_uboot\n"
+              "  例: eadk_board.py -b zk-hi3095 action enter_uboot\n"
+              "      eadk_board.py -b zk-hi3095 list   # 看有哪些按钮",
     "probe": "probe — 终端态：disconnected|login|password|uboot|shell|unknown\n"
              "  例: eadk_board.py -B http://10.168.21.236:18081 -b ok3568 probe",
     "health": "health — 连通检查；断线 exit 2\n"
@@ -1271,8 +1336,9 @@ HELP_TOPICS = {
              "      eadk_board.py -B http://10.168.21.236:18081 -b ok3568 login root mypass",
     "ensure": "ensure — 确保在 shell（可自动上电/登录）\n"
               "  例: eadk_board.py -B http://10.168.21.236:18081 -b ok3568 ensure",
-    "keys": "keys <char> [dur秒] [interval秒] — 连续发键（抢 U-Boot 常用空格）\n"
-            "  例: eadk_board.py -B http://10.168.21.236:18081 -b ok3568 keys ' ' 8 0.05",
+    "keys": "keys <序列> [dur秒] [interval秒] — 轮询发键（字面字节 + <ctrl+c> 等）\n"
+            "  例: eadk_board.py -B http://10.168.21.236:18081 -b ok3568 keys ' ' 8 0.05\n"
+            "      eadk_board.py -B http://10.168.21.236:18081 -b ok3568 keys ' <ctrl+c>ab' 8 0.05",
     "ctrlc": "ctrlc — 发送 Ctrl+C\n"
              "  例: eadk_board.py -B http://10.168.21.236:18081 -b ok3568 ctrlc",
     "write": "write <data> — 写原始字节/字符串\n"
@@ -1285,12 +1351,17 @@ HELP_TOPICS = {
               "  例: eadk_board.py -B http://10.168.21.236:18081 -b ok3568 serial open\n"
               "      eadk_board.py -B http://10.168.21.236:18081 -b ok3568 serial close",
     "reboot": "reboot / power_on / power_off — 需对应按钮为 +；无按钮用 soft-reboot\n"
+              "  流程: POST /action {id}\n"
               "  例: eadk_board.py -B http://10.168.21.236:18081 -b ok3568 reboot\n"
               "      eadk_board.py -B http://10.168.21.236:18081 -b ok3568 power_on\n"
               "      eadk_board.py -B http://10.168.21.236:18081 -b ok3568 soft-reboot",
-    "uboot": "uboot — 仅 serial；重启并抢进 U-Boot\n"
-             "  例: eadk_board.py -B http://10.168.21.236:18081 -b ok3568 -t 90 uboot",
+    "uboot": "uboot — 进 U-Boot\n"
+             "  有 enter_uboot 按钮: POST /action id=enter_uboot\n"
+             "  否则: POST /log/clear → reboot → POST /send_keys 抢键 → 等 =>\n"
+             "  例: eadk_board.py -b zk-hi3095 uboot\n"
+             "      eadk_board.py -b zk-hi3095 enter_uboot",
     "bootlog": "bootlog — 抓启动日志；-t 等待、-T 时间戳、-p 完成特征\n"
+               "  流程: [timestamp] → POST /log/clear → reboot/soft-reboot → sleep/轮询 → GET /log\n"
                "  例: eadk_board.py -B http://10.168.21.236:18081 -b ok3568 -t 120 bootlog\n"
                "      eadk_board.py -B http://10.168.21.236:18081 -b ok3568 -t 180 -T -p login: bootlog",
     "download": "download [path] — 下载内存日志到本地文件\n"
@@ -1298,11 +1369,10 @@ HELP_TOPICS = {
                 "      eadk_board.py -B http://10.168.21.236:18081 -b ok3568 download ok3568.log",
     "help-url": "help-url — 打印 /help/<通道> 链接\n"
                 "  例: eadk_board.py -B http://10.168.21.236:18081 -b ok3568 help-url",
-    "feedback": "feedback <kind> <陈述...> — 推送建议/Bug 到飞书\n"
-                "  kind: bug|建议|功能|suggest|feature；别名 suggest / bug\n"
+    "feedback": "feedback <kind> <陈述...> — 推送建议/Bug 到飞书（对齐 /help §6）\n"
+                "  格式: [本机名][bug|建议|功能] 陈述\n"
                 "  例: eadk_board.py feedback bug '串口 reconnect 后 log 为空'\n"
-                "      eadk_board.py suggest '希望 bootlog 可自定义等待'\n"
-                "      eadk_board.py -b ok3568 feedback 功能 '该板缺 xxx'",
+                "      eadk_board.py suggest '希望 bootlog 可自定义等待'",
     "suggest": "suggest <陈述...> — 同 feedback 建议\n"
                "  例: eadk_board.py suggest '希望…'",
     "bug": "bug <陈述...> — 同 feedback bug\n"
@@ -1310,8 +1380,8 @@ HELP_TOPICS = {
     "caps": "能力判定（必读）:\n"
             "  1) 先 scan 或 -b NAME list，只调用 + 项\n"
             "  2) ssh → -serial -uboot；键用 link=\n"
-            "  3) /actions 无某按钮 → -reboot/-power_*；仍可用 soft-reboot/bootlog\n"
-            "  4) serial + power_on + 无终端回显 → powered=no；run/ensure 可自动上电\n"
+            "  3) /actions 有的按钮 id 都能调（action <id> 或同名子命令）\n"
+            "  4) 无 reboot 按钮仍可用 soft-reboot / bootlog / send\n"
             "  5) connected=false → 先修串口/SSH，勿盲 run\n"
             "  例: eadk_board.py -B http://10.168.21.236:18081 scan\n"
             "      eadk_board.py -B http://10.168.21.236:18081 -b ok3568 list",
@@ -1326,9 +1396,10 @@ def usage() -> str:
   -b NAME   通道名（默认 $EADK_BOARD）
   -B URL    桥 Base（默认 $EADK_BASE）
   -t SEC    超时秒；对 uboot/bootlog 即重启等待
+  -w SEC    send 等待秒（默认 1）
   -T        bootlog/uboot 打开日志时间戳
   -p PAT    bootlog 完成特征（默认 login:）
-  -j        scan/state/list/discover 输出 JSON
+  -j        scan/state/list/discover/send 输出 JSON
   -h        本摘要
 
 推荐开场:
@@ -1336,12 +1407,16 @@ def usage() -> str:
   eadk_board.py -B http://桥:端口 scan
   eadk_board.py -b <名> list          # 只看该板 +/-
   eadk_board.py -b <名> run 'uname -a'
-  eadk_board.py -B http://桥:端口 put ./file.bin 板名/file.bin
+  eadk_board.py -b <名> -w 1 send 'printenv'   # U-Boot/非shell
+  eadk_board.py -b <名> action enter_uboot     # 有按钮才可
   eadk_board.py feedback bug '现象...'
+
+下载 CLI:
+  curl -sS -OJ \"$BASE/share/tools/eadk_board.py\"
+  curl -sS -OJ \"$BASE/share/tools/eadk_board.md\"
 
 原始 HTTP: GET $BASE/help  /  GET $BASE/api/help
 高阶 HTTP: GET /agent/probe|/agent/state|/agent/scan  POST /agent/exec
-详细文档: $BASE/tftp/download?path=tools/eadk_board.md
 """
 
 
@@ -1375,6 +1450,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("-b", dest="board", default=DEFAULT_BOARD)
     p.add_argument("-B", dest="base", default=DEFAULT_BASE)
     p.add_argument("-t", dest="timeout", type=int, default=None)
+    p.add_argument("-w", dest="send_wait", type=float, default=None)
     p.add_argument("-T", dest="want_ts", action="store_true")
     p.add_argument("-p", dest="done_pat", default="login:")
     p.add_argument("-j", "--json", dest="as_json", action="store_true")
@@ -1397,6 +1473,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         passwd=os.environ.get("EADK_PASS", "") if "EADK_PASS" in os.environ else "",
         as_json=args.as_json,
     )
+    if args.send_wait is not None:
+        c.send_wait = float(args.send_wait)
 
     try:
         if sub in ("help", "--help"):
@@ -1438,10 +1516,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 raise Die("cmd <命令...>")
             c.cmd_cmd(" ".join(rest))
             return 0
+        if sub == "send":
+            if not rest:
+                raise Die("send <命令...>  （-w 秒，默认 1）")
+            c.cmd_send(" ".join(rest), wait_sec=c.send_wait)
+            return 0
         if sub == "exec":
             if not rest:
                 raise Die("exec <命令...>")
             c.cmd_cmd(" ".join(rest))
+            return 0
+        if sub == "action":
+            if not rest:
+                raise Die("action <id>")
+            c.cmd_action(rest[0])
+            return 0
+        if sub in KNOWN_ACTION_IDS:
+            c.cmd_action(sub)
             return 0
         if sub == "keys":
             if not rest:
@@ -1470,15 +1561,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if not rest:
                 raise Die("serial open|close")
             c.cmd_serial(rest[0])
-            return 0
-        if sub == "reboot":
-            c.cmd_action("reboot")
-            return 0
-        if sub == "power_on":
-            c.cmd_action("power_on")
-            return 0
-        if sub == "power_off":
-            c.cmd_action("power_off")
             return 0
         if sub == "soft-reboot":
             c.cmd_soft_reboot()
@@ -1537,7 +1619,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 raise Die("bug <陈述...>")
             c.cmd_feedback("bug", " ".join(rest))
             return 0
-        raise Die(f"未知子命令: {sub} （见 eadk_board.py help）")
+        # 其它 /actions 自定义 id：有则当 action 调
+        try:
+            c.load_channel()
+            if sub in c.action_ids:
+                c.cmd_action(sub)
+                return 0
+        except Die:
+            pass
+        raise Die(f"未知子命令: {sub} （见 eadk_board.py help；板按钮用 list / action <id>）")
     except Die as e:
         print(f"error: {e}", file=sys.stderr)
         return int(getattr(e, "code", 1) or 1)

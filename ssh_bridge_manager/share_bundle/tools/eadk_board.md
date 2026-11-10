@@ -1,8 +1,8 @@
 # EADK SSH 桥 — 板卡 CLI 手册（人机共用）
 
-> 下载：`GET <Base>/tftp/download?path=tools/eadk_board.md`  
-> 脚本：`GET <Base>/tftp/download?path=tools/eadk_board.py`（Python3 标准库，**Win/Linux 同一脚本**）  
-> 目录：`share/tools/`
+> 下载：`GET <Base>/share/tools/eadk_board.md`  
+> 脚本：`GET <Base>/share/tools/eadk_board.py`（Python3 标准库，**Win/Linux 同一脚本**）  
+> 目录：`share/tools/`（兼容 `/tftp/download?path=tools/...`）
 
 **关系**：`/help` 原始 HTTP → `/agent/*` 高阶接口 → `eadk_board.py` 本地命令。  
 **铁律**：板名与能力以运行时为准；每次先 `discover` / `scan`，只调用该板 `+` 能力。
@@ -37,14 +37,22 @@ py -3 eadk_board.py ...          # Windows 常见
 
 ## 1. 落地（第一次）
 
-```bash
-curl -sS -OJ 'http://10.168.21.236:18081/tftp/download?path=tools/eadk_board.py'
-curl -sS -OJ 'http://10.168.21.236:18081/tftp/download?path=tools/eadk_board.md'
+从桥的 share/TFTP 拉 CLI（Win 用 `curl.exe`）：
 
+```bash
+curl.exe -sS -OJ "http://172.16.33.54:18071/share/tools/eadk_board.py"
+curl.exe -sS -OJ "http://172.16.33.54:18071/share/tools/eadk_board.md"
+
+# Linux / Git Bash
+curl -sS -OJ 'http://172.16.33.54:18071/share/tools/eadk_board.py'
+curl -sS -OJ 'http://172.16.33.54:18071/share/tools/eadk_board.md'
+```
+
+```bash
 python eadk_board.py discover
-python eadk_board.py -B http://10.168.21.236:18081 scan
-python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 list
-python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 run 'uname -a'
+python eadk_board.py -B http://172.16.33.54:18071 scan
+python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 list
+python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 run 'uname -a'
 ```
 
 环境变量：`EADK_BASE` `EADK_BOARD` `EADK_USER` `EADK_PASS` `EADK_HOST` `EADK_PUT_CHUNK`  
@@ -59,26 +67,47 @@ python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 run 'uname -a'
 |------|------|
 | `type=ssh` | 无 serial / uboot；查询键用 `link=` |
 | `type=serial` | 查询键用 `board=` |
-| 无某按钮 | 对应 `reboot` / `power_on` / `power_off` 为 `-` |
-| 无 reboot 按钮 | 仍可用 `soft-reboot`、`bootlog` |
+| `/actions` 有某按钮 | 对应 id 为 `+`，可用 `action <id>` 或同名子命令 |
+| 无 reboot 按钮 | 仍可用 `soft-reboot`、`bootlog`、`send` |
 | `connected=false` | 先修连接，勿盲 `run` |
 
 ```text
-+ run      ← 可以调
-- uboot    ← 不要调
++ run           ← 可以调
++ enter_uboot   ← 该板 /actions 有此按钮
+- upgrade       ← 该板没有，勿调
 ```
 
 ---
 
-## 3. 子命令示例（逐条）
+## 3. 指令执行逻辑（流程）
+
+| 子命令 | 流程 |
+|--------|------|
+| `send` | `POST /command` → `sleep N`（默认 1s，`-w`）→ `GET /log` 增量 |
+| `cmd` / `exec` | `POST /command`（`cmd; echo end_…`）→ 轮询 `GET /log` 直到标记 |
+| `run` | `ensure`（可 `power_on`/`login`）→ 同 `cmd` |
+| `bootlog` | `[timestamp]` → `POST /log/clear` → `reboot`/`soft-reboot` → 等待/`-p` → `GET /log` |
+| `uboot` | 有 `enter_uboot`：`POST /action`；否则 `log/clear` → 重启 → `send_keys` → 等 `=>` |
+| `action <id>` | `POST /action` `{board\|link, id}`（仅 list 里 `+` 的按钮） |
+| `reboot` 等 | 同 `action` |
+| `soft-reboot` | `POST /command` `reboot` |
+| `feedback` | 飞书 webhook：`[本机名][bug\|建议\|功能] 陈述` |
+
+**何时用 `send`**：U-Boot、login 前、或不保证在 shell 时。  
+**何时用 `run`/`cmd`**：已在 Linux shell，需要干净截取命令输出时。
+
+---
+
+## 4. 子命令示例（逐条）
 
 全局选项（多数命令可用）：
 
 | 选项 | 含义 | 例 |
 |------|------|----|
-| `-B URL` | 桥 Base | `-B http://10.168.21.236:18081` |
-| `-b 名` | 通道名 | `-b ok3568` |
+| `-B URL` | 桥 Base | `-B http://172.16.33.54:18071` |
+| `-b 名` | 通道名 | `-b zk-hi3095` |
 | `-t 秒` | 超时 / 启动等待 | `-t 120` |
+| `-w 秒` | `send` 等待（默认 1） | `-w 2` |
 | `-T` | bootlog 打开时间戳 | 见 `bootlog` |
 | `-p PAT` | bootlog 完成特征 | `-p login:` |
 | `-j` | JSON 输出 | `scan -j` |
@@ -134,21 +163,25 @@ python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 status
 `probe` 常见结果：`shell` / `login` / `uboot` / `disconnected` / `unknown`。  
 `health` 断线时 exit `2`。
 
-### 3.5 run / cmd / exec — 在板子上执行命令
+### 4.5 run / cmd / exec / send — 在板子上执行命令
 
-`run` = 先 `ensure`（可自动上电/登录）再执行，**日常首选**。
+`run` = 先 `ensure`（可自动上电/登录）再执行，**日常 shell 首选**。  
+`send` = 原始下发+等 N 秒+读 log，**U-Boot / 非 shell 首选**。
 
 ```bash
-python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 run 'uname -a'
-python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 run 'cat /proc/version'
-python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 -t 120 run 'make -j4'
+# shell
+python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 run 'uname -a'
+python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 -t 120 run 'make -j4'
+python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 cmd 'ls /'
+python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 exec 'hostname'
 
-# 已确认在 shell 时，可直接 cmd / exec
-python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 cmd 'ls /'
-python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 exec 'hostname'
+# 原始（U-Boot / 任意终端态）
+python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 send 'printenv'
+python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 -w 2 send 'help'
+python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 -w 0.5 send 'version'
 ```
 
-勿对板下发 `exit`（会退回 `login:`）。
+勿对 Linux shell 下发 `exit`（会退回 `login:`）。
 
 ### 3.6 login / ensure — 进 shell
 
@@ -193,29 +226,29 @@ python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 serial close
 
 `serial` 仅 serial 通道；先 `list` 确认是 `+serial`。
 
-### 3.10 reboot / power_on / power_off / soft-reboot — 电源与重启
+### 4.10 reboot / power_* / action / soft-reboot — 电源与板控按钮
 
-先 `list` 看该板是否 `+reboot` / `+power_on` / `+power_off`。
+先 `list` 看按钮。`/actions` 里有的 id（含 `enter_uboot` / `upgrade` / `enter_upgrade_mode`）都能调。
 
 ```bash
-python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 reboot
-python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 power_on
-python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 power_off
-
-# 无硬件 reboot 按钮时：软重启
-python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 soft-reboot
+python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 list
+python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 reboot
+python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 power_on
+python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 action enter_uboot
+python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 enter_uboot
+# 无硬件 reboot 按钮时：
+python eadk_board.py -B http://172.16.33.54:18071 -b ssh-link-96 soft-reboot
 ```
 
-### 3.11 uboot / bootlog — 进 U-Boot / 抓启动日志
-
-仅 serial 且可重启时；先确认 `+uboot` / `+bootlog`。
+### 4.11 uboot / bootlog — 进 U-Boot / 抓启动日志
 
 ```bash
-python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 -t 90 uboot
+# 有 enter_uboot 按钮时 uboot ≡ action enter_uboot
+python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 uboot
 
-python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 -t 120 bootlog
-python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 -t 120 -T bootlog
-python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 -t 180 -p 'login:' bootlog
+# bootlog: log/clear → 重启 → 等待 → GET /log
+python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 -t 120 bootlog
+python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 -t 180 -T -p 'login:' bootlog
 ```
 
 ### 3.12 put — 大文件分片上传到 share
@@ -236,18 +269,16 @@ python eadk_board.py -B http://10.168.21.236:18081 put ./rootfs.ext4 ok3568/root
 python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 help-url
 ```
 
-### 3.14 feedback / suggest / bug — 建议与缺陷
+### 4.14 feedback / suggest / bug — 建议与缺陷
 
 ```bash
 python eadk_board.py feedback bug '串口 reconnect 后 log 为空'
 python eadk_board.py feedback 建议 '希望 bootlog 支持自定义等待'
-python eadk_board.py feedback 功能 '希望一键导出全部板状态'
 python eadk_board.py suggest '希望…'
 python eadk_board.py bug '现象与期望…'
-python eadk_board.py -b ok3568 feedback bug '该板 probe 误判'
 ```
 
-正文格式：`[主机或板名][问题属性：bug|建议|功能] 陈述`。
+正文格式：`[本机名][bug|建议|功能] 陈述`（本机名，不是板名；不要写「问题属性」）。
 
 ### 3.15 help — 本机帮助
 
