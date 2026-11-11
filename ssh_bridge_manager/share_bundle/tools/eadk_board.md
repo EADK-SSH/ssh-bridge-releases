@@ -163,20 +163,23 @@ python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 status
 `probe` 常见结果：`shell` / `login` / `uboot` / `disconnected` / `unknown`。  
 `health` 断线时 exit `2`。
 
-### 4.5 run / cmd / exec / send — 在板子上执行命令
+### 4.5 run / cmd / send — 在板子上执行命令
 
 `run` = 先 `ensure`（可自动上电/登录）再执行，**日常 shell 首选**。  
+`cmd` = 已在 shell 时阻塞执行（内部可走 `/agent/exec`）。  
 `send` = 原始下发+等 N 秒+读 log，**U-Boot / 非 shell 首选**。
 
 ```bash
-# shell
+# 自动 ensure 后跑 shell 命令
 python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 run 'uname -a'
+# 长任务加大超时
 python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 -t 120 run 'make -j4'
+# 已在 shell 时直接 cmd
 python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 cmd 'ls /'
-python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 exec 'hostname'
 
-# 原始（U-Boot / 任意终端态）
+# U-Boot / 非 shell：原始下发
 python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 send 'printenv'
+# 等 2 秒再读 log
 python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 -w 2 send 'help'
 python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 -w 0.5 send 'version'
 ```
@@ -251,17 +254,24 @@ python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 -t 120 bootlog
 python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 -t 180 -T -p 'login:' bootlog
 ```
 
-### 3.12 put — 大文件分片上传到 share
+### 3.12 put / ls / mkdir / md5 / rm — share 文件
 
-Win/Linux 同命令（替代旧 `share_put.sh` / `.ps1`）。
+`put`：分片上传 + **本地/远端 MD5 校验**；失败自动重传；`-t` 总超时默认 **3600s**（也可用 `EADK_PUT_TIMEOUT`）。
 
 ```bash
+# 列目录 / 建目录
+python eadk_board.py -B http://10.168.21.236:18081 ls
+python eadk_board.py -B http://10.168.21.236:18081 ls tools
+python eadk_board.py -B http://10.168.21.236:18081 mkdir ok3568/out
+# 上传（校验 MD5；默认超时 1 小时）
 python eadk_board.py -B http://10.168.21.236:18081 put ./uImage ok3568/uImage
-python eadk_board.py -B http://10.168.21.236:18081 put ./rootfs.ext4 ok3568/rootfs.ext4
+python eadk_board.py -B http://10.168.21.236:18081 -t 7200 put ./rootfs.ext4 ok3568/rootfs.ext4
+# 自定义分片字节（第 3 参数，默认 2MiB / $EADK_PUT_CHUNK）
 python eadk_board.py -B http://10.168.21.236:18081 put ./rootfs.ext4 ok3568/rootfs.ext4 16777216
+# 校验 / 删除
+python eadk_board.py -B http://10.168.21.236:18081 md5 ok3568/uImage
+python eadk_board.py -B http://10.168.21.236:18081 rm ok3568/old.bin
 ```
-
-第三个参数为分片字节（默认 2MiB，可用 `EADK_PUT_CHUNK`）。上传后会打印远端 MD5。
 
 ### 3.13 help-url — 打印该板 /help 链接
 
@@ -295,6 +305,7 @@ python eadk_board.py help discover
 ## 4. 推荐工作流（复制即用）
 
 ```bash
+# 找桥 → 扫板 → 看能力 → 健康 → 跑命令 → 上传
 python eadk_board.py discover
 python eadk_board.py -B http://10.168.21.236:18081 scan
 python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 list
@@ -307,8 +318,9 @@ python eadk_board.py -B http://10.168.21.236:18081 put ./Image ok3568/Image
 |------|------|
 | `run` | `ensure`（可自动上电）+ 阻塞执行 |
 | `bootlog` | clear → 重启 → 等到 `-p` → 打日志 |
-| `uboot` | clear → 重启 → 抢键 → 等 `=>` |
-| `put` | 分片 `POST /tftp/upload` + 查 MD5 |
+| `uboot` | 有按钮则 `action enter_uboot`；否则 clear→重启→抢键 |
+| `put` | 分片上传 + MD5 校验/重传（默认超时 1h） |
+| `ls/mkdir/md5/rm` | share 列目录/建目录/校验/删除 |
 
 ---
 
@@ -343,7 +355,8 @@ curl -s -X POST -H 'Content-Type: application/json' \
 |-----|------|
 | `discover` | UDP `EADK1@18071` / `SSHBM1@38472` |
 | `scan` / `state` | `/agent/scan` `/agent/state` |
-| `put` | `POST /tftp/upload` + `GET /tftp/md5` |
-| `run` / `exec` | `/agent/exec` |
+| `put` | `POST /tftp/upload` + `GET /tftp/md5`（校验/重传） |
+| `ls/mkdir/md5/rm` | `/tftp/files` `/tftp/mkdir` `/tftp/md5` `/tftp/delete` |
+| `run` / `cmd` | `/agent/exec` 或 `/command`+标记 |
 | `reboot` | `POST /action` `id=reboot` |
 | `feedback` | 飞书 webhook |
