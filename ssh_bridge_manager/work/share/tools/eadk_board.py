@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -23,6 +24,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 DEFAULT_BASE = os.environ.get("EADK_BASE", "http://127.0.0.1:18071")
 DEFAULT_BOARD = os.environ.get("EADK_BOARD", "zk-hi3095")
 DEFAULT_PUT_CHUNK = int(os.environ.get("EADK_PUT_CHUNK", str(2 * 1024 * 1024)))
+DEFAULT_PUT_TIMEOUT = float(os.environ.get("EADK_PUT_TIMEOUT", "3600"))
 DEFAULT_FEEDBACK_HOOK = os.environ.get(
     "EADK_FEEDBACK_HOOK",
     os.environ.get(
@@ -37,8 +39,8 @@ LAN_PORTS = [(18071, "EADK1"), (38472, "SSHBM1")]
 FEAT_ORDER = [
     "status", "log", "clear", "cmd", "send", "keys", "ctrlc", "write", "timestamp", "reconnect",
     "serial", "reboot", "power_on", "power_off", "soft-reboot", "uboot", "bootlog",
-    "probe", "health", "state", "login", "ensure", "run", "exec", "download", "help-url",
-    "action", "scan", "discover", "put", "feedback",
+    "probe", "health", "state", "login", "ensure", "run", "download", "help-url",
+    "action", "scan", "discover", "put", "ls", "mkdir", "md5", "rm", "feedback",
 ]
 # 常见板控按钮（有则 +，无则不出现）；其它 /actions id 同样可调
 KNOWN_ACTION_IDS = ("power_on", "power_off", "reboot", "enter_uboot", "upgrade", "enter_upgrade_mode")
@@ -251,6 +253,7 @@ class Client:
         self.done_pat = done_pat
         self.as_json = as_json
         self.send_wait = 1.0  # send 子命令默认等待秒
+        self.put_timeout = DEFAULT_PUT_TIMEOUT
         self.login_user = user or os.environ.get("EADK_USER", "")
         self.login_pass = passwd if passwd is not None else os.environ.get("EADK_PASS", "")
         self.ch_name = ""
@@ -439,7 +442,8 @@ class Client:
         always = {
             "list", "status", "log", "clear", "cmd", "send", "keys", "ctrlc", "write", "timestamp",
             "reconnect", "help-url", "probe", "health", "state", "login", "ensure", "run",
-            "download", "exec", "action", "scan", "feedback", "suggest", "bug",
+            "download", "action", "scan", "feedback", "suggest", "bug",
+            "put", "ls", "files", "mkdir", "md5", "rm", "delete",
         }
         if f in always:
             return True
@@ -1211,8 +1215,120 @@ class Client:
         except json.JSONDecodeError:
             return text
 
+    def cmd_ls(self, rel: str = "") -> None:
+        """列 share 目录：GET /tftp/files?path="""
+        path = (rel or "").strip().lstrip("/")
+        q = urllib.parse.quote(path, safe="/")
+        data = self.api_get(f"/tftp/files?path={q}", timeout=60)
+        if self.as_json:
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+            return
+        if isinstance(data, dict):
+            items = data.get("files") or data.get("entries") or data.get("items") or []
+            if isinstance(items, list):
+                for it in items:
+                    if isinstance(it, dict):
+                        name = it.get("name") or it.get("path") or ""
+                        typ = it.get("type") or ("dir" if it.get("is_dir") else "file")
+                        size = it.get("size", "")
+                        print(f"{typ}\t{size}\t{name}")
+                    else:
+                        print(it)
+                return
+        print(data if isinstance(data, str) else json.dumps(data, ensure_ascii=False, indent=2))
+
+    def cmd_mkdir(self, rel: str) -> None:
+        rel = (rel or "").strip().lstrip("/")
+        if not rel:
+            raise Die("mkdir <share相对路径>")
+        self.api_post("/tftp/mkdir", {"path": rel})
+        print(f"mkdir_ok path={rel}")
+
+    def cmd_md5(self, rel: str) -> None:
+        rel = (rel or "").strip().lstrip("/")
+        if not rel:
+            raise Die("md5 <share相对路径>")
+        q = urllib.parse.quote(rel, safe="/")
+        data = self.api_get(f"/tftp/md5?path={q}", timeout=120)
+        if self.as_json:
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+        else:
+            print(data if isinstance(data, str) else json.dumps(data, ensure_ascii=False))
+
+    def cmd_rm(self, rel: str) -> None:
+        rel = (rel or "").strip().lstrip("/")
+        if not rel:
+            raise Die("rm <share相对路径>")
+        self.api_post("/tftp/delete", {"path": rel})
+        print(f"rm_ok path={rel}")
+
+    @staticmethod
+    def _file_md5(path: str) -> str:
+        h = hashlib.md5()
+        with open(path, "rb") as f:
+            while True:
+                b = f.read(1024 * 1024)
+                if not b:
+                    break
+                h.update(b)
+        return h.hexdigest()
+
+    @staticmethod
+    def _parse_remote_md5(data: Any) -> str:
+        if isinstance(data, dict):
+            for k in ("md5", "hash", "digest"):
+                v = data.get(k)
+                if isinstance(v, str) and v:
+                    return v.lower().strip()
+        if isinstance(data, str):
+            s = data.strip().lower()
+            m = re.search(r"[a-f0-9]{32}", s)
+            return m.group(0) if m else s
+        return ""
+
+    def _put_upload_once(self, path: str, rel: str, chunk: int, deadline: float) -> None:
+        total = os.path.getsize(path)
+        rel_q = urllib.parse.quote(rel, safe="/")
+        off = 0
+        with open(path, "rb") as f:
+            while off < total:
+                if time.time() > deadline:
+                    raise Die(f"put timeout ({self.put_timeout}s) at offset={off}")
+                buf = f.read(chunk)
+                if not buf:
+                    break
+                n = len(buf)
+                url_path = f"/tftp/upload?path={rel_q}&offset={off}"
+                last_err = None
+                for attempt in range(1, 4):
+                    if time.time() > deadline:
+                        raise Die(f"put timeout ({self.put_timeout}s) at offset={off}")
+                    try:
+                        left = max(30.0, deadline - time.time())
+                        resp = self.api_post_bytes(url_path, buf, timeout=left)
+                        ok = False
+                        if isinstance(resp, dict):
+                            ok = (resp.get("ok") is True or resp.get("status") == "ok"
+                                  or resp.get("ok") == 1)
+                            if resp.get("error") or resp.get("detail"):
+                                ok = False
+                        elif isinstance(resp, str):
+                            ok = '"ok"' in resp or resp.strip() == "ok"
+                        if not ok:
+                            raise Die(f"upload failed at offset={off}: {resp}")
+                        print(f"[{off}+{n}/{total}] ok attempt={attempt}")
+                        last_err = None
+                        break
+                    except Exception as e:
+                        last_err = e
+                        warn(f"chunk offset={off} attempt={attempt} failed: {e}")
+                        time.sleep(min(2 * attempt, 5))
+                if last_err is not None:
+                    raise Die(str(last_err))
+                off += n
+
     def cmd_put(self, local: str, rel: str, chunk: int = 0) -> None:
-        """分片上传本地文件到 share（原 share_put.sh/.ps1，Win/Linux 同脚本）。"""
+        """分片上传到 share；本地 MD5 与远端比对，失败重传；默认总超时 1h。"""
         if not local or not rel:
             raise Die("put <本地文件> <share相对路径> [chunk字节]")
         path = os.path.abspath(local)
@@ -1222,35 +1338,34 @@ class Client:
         if chunk < 64 * 1024:
             raise Die("chunk 过小（最小 65536）")
         total = os.path.getsize(path)
-        rel_q = urllib.parse.quote(rel, safe="/")
-        print(f"upload {path} ({total}) -> {self.base}  path={rel}")
-        off = 0
-        with open(path, "rb") as f:
-            while off < total:
-                buf = f.read(chunk)
-                if not buf:
-                    break
-                n = len(buf)
-                url_path = f"/tftp/upload?path={rel_q}&offset={off}"
-                resp = self.api_post_bytes(url_path, buf, timeout=max(120, self.timeout))
-                print(f"[{off}+{n}/{total}] {resp if isinstance(resp, str) else json.dumps(resp, ensure_ascii=False)}")
-                ok = False
-                if isinstance(resp, dict):
-                    ok = (resp.get("ok") is True or resp.get("status") == "ok"
-                          or resp.get("ok") == 1)
-                    if resp.get("error") or resp.get("detail"):
-                        ok = False
-                elif isinstance(resp, str):
-                    ok = '"ok"' in resp or resp.strip() == "ok"
-                if not ok:
-                    raise Die(f"upload failed at offset={off}: {resp}")
-                off += n
-        md5 = self.api_get(f"/tftp/md5?path={rel_q}", timeout=120)
-        if self.as_json:
-            print(json.dumps({"ok": True, "path": rel, "size": total, "md5": md5},
-                             ensure_ascii=False, indent=2))
-        else:
-            print(md5 if isinstance(md5, str) else json.dumps(md5, ensure_ascii=False))
+        local_md5 = self._file_md5(path)
+        deadline = time.time() + float(self.put_timeout)
+        print(f"upload {path} ({total}) md5={local_md5} -> {self.base} path={rel} "
+              f"timeout={self.put_timeout}s")
+        last_die: Optional[Exception] = None
+        for round_i in range(1, 3):
+            try:
+                if time.time() > deadline:
+                    raise Die(f"put timeout ({self.put_timeout}s)")
+                self._put_upload_once(path, rel, chunk, deadline)
+                rel_q = urllib.parse.quote(rel, safe="/")
+                left = max(30.0, deadline - time.time())
+                remote = self.api_get(f"/tftp/md5?path={rel_q}", timeout=left)
+                remote_md5 = self._parse_remote_md5(remote)
+                if remote_md5 and remote_md5 != local_md5:
+                    raise Die(f"md5 mismatch local={local_md5} remote={remote_md5}")
+                if self.as_json:
+                    print(json.dumps({
+                        "ok": True, "path": rel, "size": total,
+                        "md5": local_md5, "remote": remote, "rounds": round_i,
+                    }, ensure_ascii=False, indent=2))
+                else:
+                    print(f"put_ok path={rel} size={total} md5={local_md5}")
+                return
+            except Exception as e:
+                last_die = e
+                warn(f"put round {round_i} failed: {e}; retry whole file" if round_i == 1 else f"put failed: {e}")
+        raise Die(str(last_die) if last_die else "put failed")
 
 
 def detect_state_from_log(log: str, is_ssh: bool, connected: bool) -> str:
@@ -1293,10 +1408,20 @@ HELP_TOPICS = {
                 "  例: eadk_board.py discover\n"
                 "      eadk_board.py discover --self\n"
                 "      eadk_board.py discover --host 10.168.21.236 -w 2000",
-    "put": "put <本地文件> <share相对路径> [chunk] — 分片上传到 share（Win/Linux 同命令）\n"
-           "  默认 chunk=2MiB（$EADK_PUT_CHUNK）\n"
+    "put": "put <本地> <share相对路径> [chunk] — 分片上传；MD5 校验；失败重传；-t 总超时默认 3600s\n"
            "  例: eadk_board.py -B http://10.168.21.236:18081 put ./uImage ok3568/uImage\n"
-           "      eadk_board.py -B http://10.168.21.236:18081 put ./rootfs.ext4 ok3568/rootfs.ext4 16777216",
+           "      eadk_board.py -B http://10.168.21.236:18081 -t 7200 put ./rootfs.ext4 board/rootfs.ext4",
+    "ls": "ls [path] — 列 share 目录（GET /tftp/files）\n"
+          "  例: eadk_board.py -B http://10.168.21.236:18081 ls\n"
+          "      eadk_board.py -B http://10.168.21.236:18081 ls tools",
+    "mkdir": "mkdir <path> — 建 share 目录\n"
+             "  例: eadk_board.py -B http://10.168.21.236:18081 mkdir ok3568/out",
+    "md5": "md5 <path> — 校验 share 文件 MD5\n"
+           "  例: eadk_board.py -B http://10.168.21.236:18081 md5 ok3568/uImage",
+    "rm": "rm <path> — 删除 share 文件/目录\n"
+          "  例: eadk_board.py -B http://10.168.21.236:18081 rm ok3568/old.bin",
+    "files": "files — 同 ls",
+    "delete": "delete — 同 rm",
     "status": "status — 通道 agent 状态 JSON\n"
               "  例: eadk_board.py -B http://10.168.21.236:18081 -b ok3568 status",
     "log": "log [lines N|chars N] — 读日志\n"
@@ -1317,8 +1442,6 @@ HELP_TOPICS = {
            "  流程: ensure(可 power_on/login) → 同 cmd\n"
            "  例: eadk_board.py -B http://10.168.21.236:18081 -b ok3568 run 'uname -a'\n"
            "      eadk_board.py -B http://10.168.21.236:18081 -b ok3568 -t 120 run 'make -j4'",
-    "exec": "exec <命令> — 同 cmd；优先 POST /agent/exec\n"
-            "  例: eadk_board.py -B http://10.168.21.236:18081 -b ok3568 exec 'hostname'",
     "action": "action <id> — 调用板上真实按钮（GET /actions 有的 id）\n"
               "  常见: power_on / power_off / reboot / enter_uboot / upgrade / enter_upgrade_mode\n"
               "  也可直接: eadk_board.py -b NAME enter_uboot\n"
@@ -1395,7 +1518,7 @@ def usage() -> str:
 全局选项:
   -b NAME   通道名（默认 $EADK_BOARD）
   -B URL    桥 Base（默认 $EADK_BASE）
-  -t SEC    超时秒；对 uboot/bootlog 即重启等待
+  -t SEC    超时秒；cmd/run/uboot/bootlog 用；put 未指定时默认 3600
   -w SEC    send 等待秒（默认 1）
   -T        bootlog/uboot 打开日志时间戳
   -p PAT    bootlog 完成特征（默认 login:）
@@ -1409,6 +1532,8 @@ def usage() -> str:
   eadk_board.py -b <名> run 'uname -a'
   eadk_board.py -b <名> -w 1 send 'printenv'   # U-Boot/非shell
   eadk_board.py -b <名> action enter_uboot     # 有按钮才可
+  eadk_board.py ls tools
+  eadk_board.py put ./uImage board/uImage
   eadk_board.py feedback bug '现象...'
 
 下载 CLI:
@@ -1475,6 +1600,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     if args.send_wait is not None:
         c.send_wait = float(args.send_wait)
+    c.put_timeout = float(args.timeout) if args.timeout is not None else DEFAULT_PUT_TIMEOUT
 
     try:
         if sub in ("help", "--help"):
@@ -1502,6 +1628,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             chunk = int(rest[2]) if len(rest) > 2 else 0
             c.cmd_put(rest[0], rest[1], chunk)
             return 0
+        if sub in ("ls", "files"):
+            c.cmd_ls(rest[0] if rest else "")
+            return 0
+        if sub == "mkdir":
+            if not rest:
+                raise Die("mkdir <share相对路径>")
+            c.cmd_mkdir(rest[0])
+            return 0
+        if sub == "md5":
+            if not rest:
+                raise Die("md5 <share相对路径>")
+            c.cmd_md5(rest[0])
+            return 0
+        if sub in ("rm", "delete"):
+            if not rest:
+                raise Die("rm <share相对路径>")
+            c.cmd_rm(rest[0])
+            return 0
         if sub == "status":
             c.cmd_status()
             return 0
@@ -1520,11 +1664,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if not rest:
                 raise Die("send <命令...>  （-w 秒，默认 1）")
             c.cmd_send(" ".join(rest), wait_sec=c.send_wait)
-            return 0
-        if sub == "exec":
-            if not rest:
-                raise Die("exec <命令...>")
-            c.cmd_cmd(" ".join(rest))
             return 0
         if sub == "action":
             if not rest:
