@@ -1,10 +1,10 @@
 {
-  "version": "20261111-050650",
+  "version": "20261111-113203",
   "platform": "linux",
   "arch": "x86_64",
   "branch": "linux_x86_64",
-  "zip": "ssh_bridge_manager-linux-x86_64-20261111-050650.zip",
-  "zip_legacy": "ssh_bridge_manager-linux-20261111-050650.zip",
-  "url": "https://github.com/EADK-SSH/ssh-bridge-releases/releases/download/v20261111-050650/ssh_bridge_manager-linux-x86_64-20261111-050650.zip",
-  "url_legacy": "https://github.com/EADK-SSH/ssh-bridge-releases/releases/download/v20261111-050650/ssh_bridge_manager-linux-20261111-050650.zip"
+  "zip": "ssh_bridge_manager-linux-x86_64-20261111-113203.zip",
+  "zip_legacy": "ssh_bridge_manager-linux-20261111-113203.zip",
+  "url": "https://github.com/EADK-SSH/ssh-bridge-releases/releases/download/v20261111-113203/ssh_bridge_manager-linux-x86_64-20261111-113203.zip",
+  "url_legacy": "https://github.com/EADK-SSH/ssh-bridge-releases/releases/download/v20261111-113203/ssh_bridge_manager-linux-20261111-113203.zip"
 }
