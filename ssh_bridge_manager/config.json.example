@@ -5,6 +5,10 @@
     "default": {
         "username": "root",
         "password": "",
+        "login_credentials": [
+            { "username": "root", "password": "" },
+            { "username": "root", "password": "root" }
+        ],
         "buffer_size": 1048576,
         "log_enabled": true,
         "work_dir": "",
@@ -29,6 +33,20 @@
         "export_alias": "/share",
         "uid": 0,
         "gid": 0
+    },
+    "board_net": {
+        "cidr": "192.168.137.0/24",
+        "host_ip": "192.168.137.1"
+    },
+    "agent_net": {
+        "cidr": "",
+        "host_ip": ""
+    },
+    "tcp_forward": {
+        "enable": false,
+        "listen_ip": "",
+        "port_base": 22000,
+        "target_port": 22
     },
     "tunnel": {
         "server_addr": "sshbridge.online",

@@ -4,17 +4,43 @@
 > 脚本：`GET <Base>/share/tools/eadk_board.py`（Python3 标准库，**Win/Linux 同一脚本**）  
 > 目录：`share/tools/`（兼容 `/tftp/download?path=tools/...`）
 
-**关系**：`/help` 原始 HTTP → `/agent/*` 高阶接口 → `eadk_board.py` 本地命令。  
+**关系**：`GET /help` 原始 HTTP（权威）→ `/agent/*` 高阶 → `eadk_board.py` 本地封装。  
 **铁律**：板名与能力以运行时为准；每次先 `discover` / `scan`，只调用该板 `+` 能力。
 
-下文示例默认：
+---
+
+## 0. 网络拓扑（Agent 必读，勿混）
+
+本工具常跨两张网：
+
+| 名称 | 配置键 | 谁在用 | 典型用途 |
+|------|--------|--------|----------|
+| **内网 / 板侧** | `board_net.cidr` + `host_ip` | 板子 ↔ 桥的板网卡 | U-Boot `serverip`、TFTP、NFS、`tcp_forward`→板 `sshd` |
+| **外网 / Agent 侧** | `agent_net.cidr` + `host_ip` | Agent ↔ 桥的 HTTP | `EADK_BASE`、网页、`/help` 里的「Agent 外网 Base」 |
+
+回退规则（空串=`自动`；配置页用下拉，不要手填）：
+
+- `tftp.bind_ip` **空** → `board_net.host_ip` → 本机落在 `board_net.cidr` 的地址 → 再 prefer
+- `tcp_forward` 映射 **只用** `board_net.cidr`（与 Tunnel 公网 28xxx、入站 2222 无关）
+- Agent 选 Base：同机 `http://127.0.0.1:<http_port>` → 否则 `agent_net.host_ip` → 再不通用 Tunnel
+- 权威细节：设计文档 §2.15；运行时看 `GET /agent/scan` 的 `*_resolved`
+
+**三套「SSH」不要混**：
+
+| 能力 | 是什么 | 不是什么 |
+|------|--------|----------|
+| `inbound_ssh` / 串口 `/command` | 通道 ring（串口或 SSH-Link PTY） | 不是板子 `sshd:22` |
+| `tcp_forward` | 本机 `port_base+末字节` → 板侧 sshd | 仅当**没有**系统 `~/.ssh/config` LocalForward 时再用 |
+| Tunnel `map_inbound_ssh` | 把入站口映到公网 **28xxx** | 不是板网 22xxx 转发 |
+
+`GET /agent/scan` 返回 `board_net` / `agent_net` / `nets_hint`；`GET /help` 文首有双网段表。
+
+下文示例（请换成你环境的 **Agent 外网** Base）：
 
 ```text
-桥地址  http://10.168.21.236:18081
-板名    ok3568
+桥 Base  http://10.168.21.236:18081   # Agent 侧，不是板网 192.168.137.x
+板名     ok3568
 ```
-
-可先设环境变量少打字：
 
 ```bash
 # Linux / Git Bash / macOS
@@ -26,8 +52,6 @@ $env:EADK_BASE='http://10.168.21.236:18081'
 $env:EADK_BOARD='ok3568'
 ```
 
-运行方式（二选一）：
-
 ```bash
 python eadk_board.py ...
 py -3 eadk_board.py ...          # Windows 常见
@@ -37,25 +61,19 @@ py -3 eadk_board.py ...          # Windows 常见
 
 ## 1. 落地（第一次）
 
-从桥的 share/TFTP 拉 CLI（Win 用 `curl.exe`）：
+从桥的 share 拉 CLI（Base = **Agent 外网** 或环路；Win 用 `curl.exe`）：
 
 ```bash
-curl.exe -sS -OJ "http://172.16.33.54:18071/share/tools/eadk_board.py"
-curl.exe -sS -OJ "http://172.16.33.54:18071/share/tools/eadk_board.md"
-
-# Linux / Git Bash
-curl -sS -OJ 'http://172.16.33.54:18071/share/tools/eadk_board.py'
-curl -sS -OJ 'http://172.16.33.54:18071/share/tools/eadk_board.md'
-```
-
-```bash
+curl.exe -sS -OJ "$EADK_BASE/share/tools/eadk_board.py"
+curl.exe -sS -OJ "$EADK_BASE/share/tools/eadk_board.md"
+# 或先 discover 再填 Base
 python eadk_board.py discover
-python eadk_board.py -B http://172.16.33.54:18071 scan
-python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 list
-python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 run 'uname -a'
+python eadk_board.py -B http://10.168.21.236:18081 scan
+python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 list
+python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 run 'uname -a'
 ```
 
-环境变量：`EADK_BASE` `EADK_BOARD` `EADK_USER` `EADK_PASS` `EADK_HOST` `EADK_PUT_CHUNK`  
+环境变量：`EADK_BASE` `EADK_BOARD` `EADK_USER` `EADK_PASS` `EADK_HOST`（仅反馈本机名）`EADK_PUT_CHUNK`  
 反馈：`EADK_FEEDBACK_HOOK` / `FEISHU_HOOK`  
 依赖：仅标准库（见 `requirements.txt`，无需 pip）。
 
@@ -65,10 +83,10 @@ python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 run 'uname -a'
 
 | 条件 | 影响 |
 |------|------|
-| `type=ssh` | 无 serial / uboot；查询键用 `link=` |
-| `type=serial` | 查询键用 `board=` |
+| `type=ssh` / `ssh-link` | 无 serial/uboot；查询键用 **`link=`**（不是板侧 sshd，是 SSH-Link 中继） |
+| `type=serial` | 查询键用 **`board=`** |
 | `/actions` 有某按钮 | 对应 id 为 `+`，可用 `action <id>` 或同名子命令 |
-| 无 reboot 按钮 | 仍可用 `soft-reboot`、`bootlog`、`send` |
+| 无 reboot 按钮 | 仍可用 `soft-reboot`、`bootlog`、`send` / `command` |
 | `connected=false` | 先修连接，勿盲 `run` |
 
 ```text
@@ -81,20 +99,22 @@ python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 run 'uname -a'
 
 ## 3. 指令执行逻辑（流程）
 
-| 子命令 | 流程 |
-|--------|------|
-| `send` | `POST /command` → `sleep N`（默认 1s，`-w`）→ `GET /log` 增量 |
-| `cmd` / `exec` | `POST /command`（`cmd; echo end_…`）→ 轮询 `GET /log` 直到标记 |
-| `run` | `ensure`（可 `power_on`/`login`）→ 同 `cmd` |
-| `bootlog` | `[timestamp]` → `POST /log/clear` → `reboot`/`soft-reboot` → 等待/`-p` → `GET /log` |
-| `uboot` | 有 `enter_uboot`：`POST /action`；否则 `log/clear` → 重启 → `send_keys` → 等 `=>` |
-| `action <id>` | `POST /action` `{board\|link, id}`（仅 list 里 `+` 的按钮） |
-| `reboot` 等 | 同 `action` |
-| `soft-reboot` | `POST /command` `reboot` |
-| `feedback` | 飞书 webhook：`[本机名][bug\|建议\|功能] 陈述` |
+`/command` = **异步**写通道（串口/SSH-Link ring），**立刻**返回；不是传统 SSH，也不等输出。
 
-**何时用 `send`**：U-Boot、login 前、或不保证在 shell 时。  
-**何时用 `run`/`cmd`**：已在 Linux shell，需要干净截取命令输出时。
+| 子命令 | 流程 | 何时用 |
+|--------|------|--------|
+| `command` | 仅 `POST /command` → queued | 只要下发、自己再 sleep/log |
+| `send` | `POST /command` → sleep N（默认 1，`-w`）→ `GET /log` 增量 | U-Boot / 非 shell |
+| `cmd` | 标记阻塞（可 `/agent/exec`） | 已在 Linux shell |
+| `run` | `ensure`（可上电/login）→ 同 `cmd` | 日常 shell **首选** |
+| `login` | 板 `target_*` → `login_credentials` → 写回 persist | 进 shell 前 |
+| `bootlog` | clear → reboot → 等待 → log | 抓启动 |
+| `uboot` / `action` | 见下 | 按钮或抢键 |
+| `feedback` | 飞书 `[本机名][bug\|建议\|功能]` | 反馈 |
+| `to-board` | 见 §3.12b：scp-pull → scp-push → share | 主机工程文件→板 **首选** |
+
+**已移除对外 `exec` 别名**；阻塞执行用 `cmd`/`run` 或 `POST /agent/exec`。  
+送文件到板：**优先本 CLI `to-board`**；无 Python 时按 `GET /help` §3.4 原始 HTTP。
 
 ---
 
@@ -163,19 +183,22 @@ python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 status
 `probe` 常见结果：`shell` / `login` / `uboot` / `disconnected` / `unknown`。  
 `health` 断线时 exit `2`。
 
-### 4.5 run / cmd / send — 在板子上执行命令
+### 4.5 run / cmd / send / command — 在通道上执行（非板侧 sshd）
 
 `run` = 先 `ensure`（可自动上电/登录）再执行，**日常 shell 首选**。  
 `cmd` = 已在 shell 时阻塞执行（内部可走 `/agent/exec`）。  
-`send` = 原始下发+等 N 秒+读 log，**U-Boot / 非 shell 首选**。
+`send` = `command` + 短等 + 读 log，**U-Boot / 非 shell 首选**。  
+`command` = 纯异步 `POST /command`（不读 log）。
 
 ```bash
 # 自动 ensure 后跑 shell 命令
-python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 run 'uname -a'
+python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 run 'uname -a'
 # 长任务加大超时
-python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 -t 120 run 'make -j4'
+python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 -t 120 run 'make -j4'
 # 已在 shell 时直接 cmd
-python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 cmd 'ls /'
+python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 cmd 'ls /'
+# 纯异步
+python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 command 'uname -a'
 
 # U-Boot / 非 shell：原始下发
 python eadk_board.py -B http://172.16.33.54:18071 -b zk-hi3095 send 'printenv'
@@ -273,6 +296,18 @@ python eadk_board.py -B http://10.168.21.236:18081 md5 ok3568/uImage
 python eadk_board.py -B http://10.168.21.236:18081 rm ok3568/old.bin
 ```
 
+### 3.12b to-board — 主机工程文件送到板（首选）
+
+阶梯（`--method=auto`）：① 板 ping 通板网主机 → 板 `scp` 拉；② 开 `tcp_forward` → 主机 `scp` 推；③ `put` share → 板 tftp/http/nfs 拉。
+
+```bash
+python eadk_board.py -B http://10.168.21.236:18081 -b ok3568 to-board ./Image /tmp/Image
+python eadk_board.py -b ok3568 to-board ./a.bin /tmp/a.bin --method=share
+python eadk_board.py -b ok3568 to-board ./a.bin --board-ip=192.168.137.100 --method=scp-push
+```
+
+密钥：拉=私钥在板、公钥在主机；推=私钥在主机、公钥在板 `authorized_keys`。无 CLI 时见 `GET /help` §3.4。
+
 ### 3.13 help-url — 打印该板 /help 链接
 
 ```bash
@@ -320,6 +355,7 @@ python eadk_board.py -B http://10.168.21.236:18081 put ./Image ok3568/Image
 | `bootlog` | clear → 重启 → 等到 `-p` → 打日志 |
 | `uboot` | 有按钮则 `action enter_uboot`；否则 clear→重启→抢键 |
 | `put` | 分片上传 + MD5 校验/重传（默认超时 1h） |
+| `to-board` | 主机文件→板：scp-pull / tcp_forward 推 / share |
 | `ls/mkdir/md5/rm` | share 列目录/建目录/校验/删除 |
 
 ---
@@ -356,6 +392,7 @@ curl -s -X POST -H 'Content-Type: application/json' \
 | `discover` | UDP `EADK1@18071` / `SSHBM1@38472` |
 | `scan` / `state` | `/agent/scan` `/agent/state` |
 | `put` | `POST /tftp/upload` + `GET /tftp/md5`（校验/重传） |
+| `to-board` | `/agent/exec` ping+scp；`/tcp_forward/*`+本机 scp；或 put+板拉 |
 | `ls/mkdir/md5/rm` | `/tftp/files` `/tftp/mkdir` `/tftp/md5` `/tftp/delete` |
 | `run` / `cmd` | `/agent/exec` 或 `/command`+标记 |
 | `reboot` | `POST /action` `id=reboot` |
