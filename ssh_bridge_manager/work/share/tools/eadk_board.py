@@ -40,7 +40,7 @@ FEAT_ORDER = [
     "status", "log", "clear", "cmd", "send", "keys", "ctrlc", "write", "timestamp", "reconnect",
     "serial", "reboot", "power_on", "power_off", "soft-reboot", "uboot", "bootlog",
     "probe", "health", "state", "login", "ensure", "run", "download", "help-url",
-    "action", "scan", "discover", "put", "ls", "mkdir", "md5", "rm", "feedback",
+    "action", "scan", "discover", "put", "to-board", "ls", "mkdir", "md5", "rm", "feedback",
 ]
 # 常见板控按钮（有则 +，无则不出现）；其它 /actions id 同样可调
 KNOWN_ACTION_IDS = ("power_on", "power_off", "reboot", "enter_uboot", "upgrade", "enter_upgrade_mode")
@@ -369,12 +369,47 @@ class Client:
         else:
             self.uboot_char, self.uboot_dur, self.uboot_int, self.uboot_mark = " ", 8.0, 0.05, "=>"
 
+    def fetch_login_credentials(self) -> List[Dict[str, str]]:
+        """工程级候选账密（靠前优先）。来自 GET /agent/scan → login_credentials。"""
+        try:
+            sc = self.api_get("/agent/scan")
+        except Die:
+            return []
+        if not isinstance(sc, dict):
+            return []
+        out: List[Dict[str, str]] = []
+        for it in sc.get("login_credentials") or []:
+            if not isinstance(it, dict):
+                continue
+            u = (it.get("username") or it.get("user") or "").strip()
+            if not u:
+                continue
+            out.append({"username": u, "password": it.get("password") if it.get("password") is not None else it.get("pass") or ""})
+        return out
+
+    def remember_login(self, user: str, passwd: str) -> None:
+        """试对后写回通道 target_*（persist），下次优先板级账密。"""
+        body = self.ch_body(target_username=user, target_password=passwd if passwd is not None else "", persist=True)
+        try:
+            self.api_post("/channel/configure", body)
+            self.ch_target_user = user
+            self.ch_target_pass = passwd if passwd is not None else ""
+            self.login_user = user
+            self.login_pass = passwd if passwd is not None else ""
+        except Die as e:
+            warn(f"登录成功但写回配置失败: {e}")
+
     def default_login(self) -> None:
         if self.login_user:
             return
         if self.ch_target_user:
             self.login_user = self.ch_target_user
             self.login_pass = self.ch_target_pass
+            return
+        creds = self.fetch_login_credentials()
+        if creds:
+            self.login_user = creds[0]["username"]
+            self.login_pass = creds[0].get("password") or ""
             return
         if self.ch_name in ("zk-hi3095", "kede-hi3095"):
             self.login_user = "root"
@@ -443,7 +478,7 @@ class Client:
             "list", "status", "log", "clear", "cmd", "send", "keys", "ctrlc", "write", "timestamp",
             "reconnect", "help-url", "probe", "health", "state", "login", "ensure", "run",
             "download", "action", "scan", "feedback", "suggest", "bug",
-            "put", "ls", "files", "mkdir", "md5", "rm", "delete",
+            "put", "to-board", "ls", "files", "mkdir", "md5", "rm", "delete",
         }
         if f in always:
             return True
@@ -492,7 +527,7 @@ class Client:
             )
 
     def feats_map(self) -> Dict[str, bool]:
-        skip = {"scan", "feedback", "suggest", "bug", "discover", "put"}
+        skip = {"scan", "feedback", "suggest", "bug", "discover", "put", "to-board"}
         m = {f: self.feature_enabled(f) for f in FEAT_ORDER if f not in skip}
         for aid in self.action_ids:
             m[aid] = True
@@ -749,6 +784,17 @@ class Client:
         self.require_feat("soft-reboot")
         self.raw_command("reboot")
 
+    def cmd_command(self, cmdline: str) -> None:
+        """纯异步单指令：仅 POST /command（串口/SSH-Link 中继通道，非传统 sshd）。
+        不阻塞、不等待；需自行 sleep 后再 log。复合/阻塞请用 send/cmd/run。
+        """
+        self.require_connected()
+        self.raw_command(cmdline)
+        if self.as_json:
+            print(json.dumps({"ok": True, "queued": True, "channel": self.ch_name, "command": cmdline}, ensure_ascii=False))
+        else:
+            print(f"queued channel={self.ch_name} (async /command; sleep then log)")
+
     def cmd_send(self, cmdline: str, wait_sec: Optional[float] = None) -> None:
         """最原始下发：POST /command → sleep N 秒 → 返回新增日志。
         不依赖 shell marker，U-Boot / 无 shell 环境也可用。
@@ -791,7 +837,8 @@ class Client:
             clean = clean[:j]
         return clean.strip("\n")
 
-    def cmd_cmd(self, cmdline: str) -> None:
+    def exec_shell(self, cmdline: str, *, print_out: bool = True) -> str:
+        """已在 shell 时阻塞执行；返回输出（可选择是否打印）。"""
         self.require_connected()
         self.require_feat("cmd")
         st = self.detect_state()
@@ -803,7 +850,7 @@ class Client:
             raise Die("未连接")
         if st == "unknown":
             warn("状态 unknown，仍尝试下发；失败请先 ensure/login")
-        # Prefer server /agent/exec
+        out = ""
         if self.has_agent_api():
             try:
                 r = self.api_post(
@@ -814,11 +861,10 @@ class Client:
                 if isinstance(r, dict):
                     if r.get("timed_out"):
                         raise Die(f"timeout {self.timeout}s（state={r.get('state')}）")
-                    out = r.get("output")
-                    if out is None:
-                        out = ""
-                    print(out if str(out).endswith("\n") else str(out))
-                    return
+                    out = "" if r.get("output") is None else str(r.get("output"))
+                    if print_out:
+                        print(out if out.endswith("\n") else out)
+                    return out
             except Die as e:
                 if "not found" in str(e).lower() or "404" in str(e):
                     self._agent_api = False
@@ -831,14 +877,19 @@ class Client:
         while True:
             log = self.fetch_log()
             if self.log_has_marker(log, marker):
-                print(self.extract_after_echo_marker(log, marker))
-                return
+                out = self.extract_after_echo_marker(log, marker)
+                if print_out:
+                    print(out)
+                return out
             st = self.detect_state()
             if st in ("login", "password"):
                 raise Die(f"命令似乎打到了 {st} 提示符（未登录）。请: login 或 run")
             if time.time() - start >= self.timeout:
                 raise Die(f"timeout {self.timeout}s 等待 {marker}（state={self.detect_state()}）")
             time.sleep(POLL_INTERVAL)
+
+    def cmd_cmd(self, cmdline: str) -> None:
+        self.exec_shell(cmdline, print_out=True)
 
     def cmd_probe(self) -> None:
         self.load_channel()
@@ -1064,10 +1115,6 @@ class Client:
     def cmd_login(self, user: str = "", passwd: Optional[str] = None) -> None:
         self.require_connected()
         self.ensure_powered()
-        u = user or self.login_user
-        p = self.login_pass if passwd is None else passwd
-        if not u:
-            raise Die("login 需要用户名（参数或 EADK_USER）")
         st = self.detect_state()
         if st == "shell":
             if self.wait_shell_marker(8):
@@ -1078,15 +1125,39 @@ class Client:
             raise Die("当前在 U-Boot，无法 login；请先启动系统或用 uboot 操作")
         elif st == "disconnected":
             raise Die("未连接")
-        if self.login_once(u, p):
-            print(f"login_ok user={u}")
-            return
-        if p:
-            warn("密码登录失败，尝试空密码")
-            if self.login_once(u, ""):
-                print(f"login_ok user={u} pass=empty")
+        # 显式参数 → 只试这一组；否则：板级 target_* → login_credentials 列表 → EADK_USER/PASS
+        candidates: List[Tuple[str, str, bool]] = []  # user, pass, remember
+        if user:
+            candidates.append((user, "" if passwd is None else passwd, False))
+        else:
+            if self.ch_target_user:
+                candidates.append((self.ch_target_user, self.ch_target_pass or "", False))
+            for c in self.fetch_login_credentials():
+                pair = (c["username"], c.get("password") or "")
+                if pair not in [(x[0], x[1]) for x in candidates]:
+                    candidates.append((pair[0], pair[1], True))
+            if self.login_user:
+                pair = (self.login_user, self.login_pass or "")
+                if pair not in [(x[0], x[1]) for x in candidates]:
+                    candidates.append((pair[0], pair[1], False))
+        if not candidates:
+            raise Die("login 需要用户名（参数 / 板 target_* / default.login_credentials / EADK_USER）")
+        for u, p, remember in candidates:
+            if self.login_once(u, p):
+                print(f"login_ok user={u}")
+                if remember or (self.ch_target_user != u or (self.ch_target_pass or "") != (p or "")):
+                    if not self.ch_target_user or remember:
+                        self.remember_login(u, p)
                 return
-        raise Die(f"登录失败 user={u}（state={self.detect_state()}；可: login <user> <pass>）")
+            if p:
+                warn(f"密码登录失败 user={u}，尝试空密码")
+                if self.login_once(u, ""):
+                    print(f"login_ok user={u} pass=empty")
+                    if remember or not self.ch_target_user:
+                        self.remember_login(u, "")
+                    return
+        tried = ",".join(x[0] for x in candidates)
+        raise Die(f"登录失败 tried={tried}（state={self.detect_state()}；可: login <user> <pass>）")
 
     def cmd_ensure(self) -> None:
         self.require_connected()
@@ -1367,6 +1438,276 @@ class Client:
                 warn(f"put round {round_i} failed: {e}; retry whole file" if round_i == 1 else f"put failed: {e}")
         raise Die(str(last_die) if last_die else "put failed")
 
+    def _parse_kv_args(self, args: Sequence[str]) -> Tuple[List[str], Dict[str, str]]:
+        pos: List[str] = []
+        kv: Dict[str, str] = {}
+        for a in args:
+            if a.startswith("--") and "=" in a:
+                k, v = a[2:].split("=", 1)
+                kv[k.replace("-", "_")] = v
+            elif a.startswith("--") and a[2:]:
+                kv[a[2:].replace("-", "_")] = "1"
+            else:
+                pos.append(a)
+        return pos, kv
+
+    def resolve_board_net_host_ip(self) -> str:
+        """板网侧桥主机 IP（板子 ping/scp 的对端）。"""
+        try:
+            sc = self.api_get("/agent/scan", timeout=15)
+        except Die:
+            sc = {}
+        if isinstance(sc, dict):
+            bn = sc.get("board_net") or {}
+            if isinstance(bn, dict):
+                for k in ("host_ip_resolved", "host_ip"):
+                    v = (bn.get(k) or "").strip()
+                    if v and v.lower() != "auto":
+                        return v
+            try:
+                st = self.api_get("/tftp/status", timeout=10)
+                if isinstance(st, dict):
+                    bip = (st.get("bind_ip") or "").strip()
+                    if bip and bip.lower() != "auto":
+                        return bip
+            except Die:
+                pass
+        raise Die("无法解析 board_net 主机 IP；请配置 board_net.host_ip 或传 --host-ip=")
+
+    def detect_board_ip(self, host_ip: str) -> str:
+        out = self.exec_shell(
+            f"ip -4 route get {host_ip} 2>/dev/null | awk '{{for(i=1;i<=NF;i++) if($i==\"src\") {{print $(i+1); exit}}}}'",
+            print_out=False,
+        )
+        m = re.search(r"\b(\d+\.\d+\.\d+\.\d+)\b", out or "")
+        if m and not m.group(1).startswith("127."):
+            return m.group(1)
+        out = self.exec_shell("hostname -I 2>/dev/null || ip -4 -o addr show | awk '{print $4}'", print_out=False)
+        for ip in re.findall(r"\b(\d+\.\d+\.\d+\.\d+)\b", out or ""):
+            if not ip.startswith("127."):
+                return ip
+        raise Die("无法探测板 IP；请传 --board-ip=")
+
+    def board_ping_host(self, host_ip: str) -> bool:
+        out = self.exec_shell(
+            f"(ping -c 1 -W 2 {host_ip} || ping -c 1 -w 2 {host_ip}) >/tmp/.eadk_ping 2>&1; "
+            f"echo PING_RC:$?; tail -n 5 /tmp/.eadk_ping",
+            print_out=False,
+        )
+        m = re.search(r"PING_RC:(\d+)", out or "")
+        if m and m.group(1) == "0":
+            return True
+        if re.search(r"1 received|1 packets received|bytes from", out or "", re.I):
+            return True
+        return False
+
+    def ensure_tcp_forward(self) -> None:
+        st = self.api_get("/tcp_forward/status", timeout=10)
+        running = isinstance(st, dict) and bool(st.get("running"))
+        if running:
+            return
+        warn("tcp_forward 未运行，尝试 enable")
+        body: Dict[str, Any] = {"enable": True}
+        try:
+            sc = self.api_get("/agent/scan", timeout=15)
+            if isinstance(sc, dict) and isinstance(sc.get("board_net"), dict):
+                body["board_net"] = sc["board_net"]
+        except Die:
+            pass
+        self.api_post("/tcp_forward/config", body, timeout=30)
+
+    def map_tcp_forward_port(self, board_ip: str) -> int:
+        self.ensure_tcp_forward()
+        m = self.api_get(f"/tcp_forward/map?ip={urllib.parse.quote(board_ip)}", timeout=10)
+        if not isinstance(m, dict):
+            raise Die(f"tcp_forward/map 异常: {m}")
+        port = m.get("port") or m.get("listen_port")
+        if port is None:
+            raise Die(f"tcp_forward/map 无 port: {m}")
+        return int(port)
+
+    def local_scp(self, args: List[str], timeout: float) -> None:
+        scp = "scp.exe" if sys.platform == "win32" else "scp"
+        cmd = [scp] + args
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except FileNotFoundError as e:
+            raise Die(f"本机无 {scp}；请安装 OpenSSH 客户端") from e
+        except subprocess.TimeoutExpired as e:
+            raise Die(f"scp timeout {timeout}s") from e
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "").strip()
+            raise Die(f"scp failed ({r.returncode}): {err}")
+
+    def cmd_to_board(self, args: Sequence[str]) -> None:
+        """把 Agent 主机本地文件送到板：scp-pull → scp-push(tcp_forward) → share(tftp/nfs/http)。"""
+        pos, kv = self._parse_kv_args(args)
+        if not pos:
+            raise Die(
+                "to-board <本地文件> [板端路径] [--method=auto|scp-pull|scp-push|share] "
+                "[--board-ip=] [--host-ip=] [--host-user=] [--board-user=]"
+            )
+        local = os.path.abspath(pos[0])
+        if not os.path.isfile(local):
+            raise Die(f"本地文件不存在: {pos[0]}")
+        dest = pos[1] if len(pos) > 1 else f"/tmp/{os.path.basename(local)}"
+        method = (kv.get("method") or "auto").strip().lower()
+        host_ip = (kv.get("host_ip") or "").strip() or self.resolve_board_net_host_ip()
+        host_user = (
+            (kv.get("host_user") or "").strip()
+            or os.environ.get("EADK_HOST_USER", "")
+            or os.environ.get("USERNAME")
+            or os.environ.get("USER")
+            or "root"
+        )
+        board_user = (
+            (kv.get("board_user") or "").strip()
+            or os.environ.get("EADK_BOARD_USER", "")
+            or self.login_user
+            or "root"
+        )
+        self.cmd_ensure()
+        board_ip = (kv.get("board_ip") or "").strip()
+        if not board_ip and method in ("auto", "scp-push"):
+            try:
+                board_ip = self.detect_board_ip(host_ip)
+            except Die as e:
+                if method == "scp-push":
+                    raise
+                warn(str(e))
+
+        tried: List[str] = []
+        errors: List[str] = []
+
+        def try_scp_pull() -> bool:
+            tried.append("scp-pull")
+            if not self.board_ping_host(host_ip):
+                errors.append(f"scp-pull: 板 ping {host_ip} 不通")
+                return False
+            # 板拉主机：私钥在板，公钥在主机 authorized_keys；BatchMode 免密
+            remote = f"{host_user}@{host_ip}:{local.replace(chr(92), '/')}"
+            q_remote = remote.replace("'", "'\\''")
+            q_dest = dest.replace("'", "'\\''")
+            out = self.exec_shell(
+                f"mkdir -p \"$(dirname '{q_dest}')\" 2>/dev/null; "
+                f"scp -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=8 "
+                f"'{q_remote}' '{q_dest}'; echo SCP_RC:$?",
+                print_out=False,
+            )
+            m = re.search(r"SCP_RC:(\d+)", out or "")
+            if m and m.group(1) == "0":
+                return True
+            errors.append(f"scp-pull failed: {(out or '')[-400:]}")
+            return False
+
+        def try_scp_push() -> bool:
+            tried.append("scp-push")
+            if not board_ip:
+                errors.append("scp-push: 缺 board_ip")
+                return False
+            try:
+                port = self.map_tcp_forward_port(board_ip)
+            except Die as e:
+                errors.append(f"scp-push map: {e}")
+                return False
+            try:
+                self.local_scp(
+                    [
+                        "-P", str(port),
+                        "-o", "BatchMode=yes",
+                        "-o", "StrictHostKeyChecking=no",
+                        "-o", "ConnectTimeout=8",
+                        local,
+                        f"{board_user}@127.0.0.1:{dest}",
+                    ],
+                    timeout=float(self.timeout),
+                )
+                return True
+            except Die as e:
+                errors.append(f"scp-push: {e}")
+                return False
+
+        def try_share() -> bool:
+            tried.append("share")
+            rel = f"{self.ch_name}/{os.path.basename(local)}"
+            try:
+                self.cmd_put(local, rel)
+            except Die as e:
+                errors.append(f"share put: {e}")
+                return False
+            # 开 TFTP（惯例只开不关）
+            try:
+                self.api_post("/tftp/config", {"enable": True}, timeout=20)
+            except Die as e:
+                warn(f"tftp enable: {e}")
+            serverip = host_ip
+            try:
+                st = self.api_get("/tftp/status", timeout=10)
+                if isinstance(st, dict) and (st.get("bind_ip") or "").strip():
+                    serverip = st["bind_ip"].strip()
+            except Die:
+                pass
+            http_port = urllib.parse.urlparse(self.base).port or 18071
+            q_dest = dest.replace("'", "'\\''")
+            q_rel = rel.replace("'", "'\\''")
+            # tftp → wget/http → nfs
+            script = (
+                f"mkdir -p \"$(dirname '{q_dest}')\" 2>/dev/null; "
+                f"ok=0; "
+                f"if command -v tftp >/dev/null 2>&1; then "
+                f"  (cd \"$(dirname '{q_dest}')\" && tftp -g -r '{q_rel}' {serverip} && "
+                f"   mv -f \"$(basename '{q_rel}')\" '{q_dest}' && ok=1) 2>/tmp/.eadk_tf || true; "
+                f"fi; "
+                f"if [ \"$ok\" != 1 ] && command -v wget >/dev/null 2>&1; then "
+                f"  wget -q -O '{q_dest}' 'http://{serverip}:{http_port}/share/{q_rel}' && ok=1 || true; "
+                f"fi; "
+                f"if [ \"$ok\" != 1 ] && command -v curl >/dev/null 2>&1; then "
+                f"  curl -fsS -o '{q_dest}' 'http://{serverip}:{http_port}/share/{q_rel}' && ok=1 || true; "
+                f"fi; "
+                f"if [ \"$ok\" != 1 ]; then "
+                f"  mkdir -p /mnt/eadk_share 2>/dev/null; "
+                f"  mount -t nfs -o nolock,vers=3,tcp {serverip}:/share /mnt/eadk_share 2>/tmp/.eadk_nfs || true; "
+                f"  if [ -f /mnt/eadk_share/{q_rel} ]; then cp -f /mnt/eadk_share/{q_rel} '{q_dest}' && ok=1; fi; "
+                f"fi; "
+                f"echo SHARE_RC:$ok; ls -l '{q_dest}' 2>/dev/null | head -n 1"
+            )
+            out = self.exec_shell(script, print_out=False)
+            if re.search(r"SHARE_RC:1", out or ""):
+                return True
+            errors.append(f"share pull: {(out or '')[-500:]}")
+            return False
+
+        order = []
+        if method == "auto":
+            order = [try_scp_pull, try_scp_push, try_share]
+        elif method == "scp-pull":
+            order = [try_scp_pull]
+        elif method in ("scp-push", "tcp_forward", "forward"):
+            order = [try_scp_push]
+        elif method == "share":
+            order = [try_share]
+        else:
+            raise Die(f"未知 --method={method}（auto|scp-pull|scp-push|share）")
+
+        used = ""
+        for fn in order:
+            name = fn.__name__.replace("try_", "")
+            print(f"to-board try {name} local={local} -> {dest} host_ip={host_ip} board_ip={board_ip or '-'}")
+            if fn():
+                used = name
+                break
+        if not used:
+            raise Die("to-board 全部失败: " + " | ".join(errors) if errors else "to-board 失败")
+        info = {
+            "ok": True, "method": used, "tried": tried, "local": local, "dest": dest,
+            "host_ip": host_ip, "board_ip": board_ip or None, "host_user": host_user,
+            "board_user": board_user,
+        }
+        if self.as_json:
+            print(json.dumps(info, ensure_ascii=False, indent=2))
+        else:
+            print(f"to_board_ok method={used} dest={dest} board_ip={board_ip or '-'} host_ip={host_ip}")
+
 
 def detect_state_from_log(log: str, is_ssh: bool, connected: bool) -> str:
     if not connected:
@@ -1411,6 +1752,15 @@ HELP_TOPICS = {
     "put": "put <本地> <share相对路径> [chunk] — 分片上传；MD5 校验；失败重传；-t 总超时默认 3600s\n"
            "  例: eadk_board.py -B http://10.168.21.236:18081 put ./uImage ok3568/uImage\n"
            "      eadk_board.py -B http://10.168.21.236:18081 -t 7200 put ./rootfs.ext4 board/rootfs.ext4",
+    "to-board": "to-board <本地> [板端路径] — 工程文件送到板（优先 CLI）\n"
+                "  阶梯 auto: ①板 ping 通板网 host → 板 scp 拉主机(密钥免密)\n"
+                "            ②开 tcp_forward → 主机 scp 推板\n"
+                "            ③put share → 板 tftp/wget/nfs 拉\n"
+                "  --method=auto|scp-pull|scp-push|share\n"
+                "  --board-ip= --host-ip= --host-user= --board-user=\n"
+                "  密钥: 拉=私钥在板/公钥在主机; 推=私钥在主机/公钥在板 authorized_keys\n"
+                "  例: eadk_board.py -b ok3568 to-board ./Image /tmp/Image\n"
+                "      eadk_board.py -b ok3568 to-board ./a.bin /tmp/a.bin --method=share",
     "ls": "ls [path] — 列 share 目录（GET /tftp/files）\n"
           "  例: eadk_board.py -B http://10.168.21.236:18081 ls\n"
           "      eadk_board.py -B http://10.168.21.236:18081 ls tools",
@@ -1430,14 +1780,28 @@ HELP_TOPICS = {
            "      eadk_board.py -B http://10.168.21.236:18081 -b ok3568 log chars 4000",
     "clear": "clear — 清空日志\n"
              "  例: eadk_board.py -B http://10.168.21.236:18081 -b ok3568 clear",
-    "cmd": "cmd <命令> — 已在 shell 时阻塞执行（等 echo 标记）\n"
+    "cmd": "cmd <命令> — 已在 shell 时阻塞执行（等 echo 标记；复合进阶）\n"
+           "  通道: 串口/SSH-Link 中继 ring，不是传统 sshd\n"
            "  流程: POST /command「cmd; echo end_…」→ 轮询 GET /log 直到标记\n"
            "  例: eadk_board.py -B http://10.168.21.236:18081 -b ok3568 cmd 'ls /'",
-    "send": "send <命令> — 原始下发（U-Boot / 非 shell 也可用）\n"
+    "command": "command <命令> — 纯异步单指令（保留原始 Agent API）\n"
+               "  仅 POST /command → 立即 queued；串口异步，不会等输出\n"
+               "  用法: eadk_board.py -b NAME command 'uname -a'\n"
+               "        # 再自行 sleep / eadk_board.py -b NAME log\n"
+               "  与 send 区别: send=command+等待+读log；command=只下发",
+    "send": "send <命令> — 原始下发+短等+读 log（U-Boot / 非 shell 也可用）\n"
+            "  通道: 串口/SSH-Link 中继（非传统 SSH）；底层仍是异步 POST /command\n"
             "  流程: POST /command → sleep N 秒（默认 1，-w 可改）→ GET /log 增量\n"
             "  例: eadk_board.py -b zk-hi3095 send 'printenv'\n"
             "      eadk_board.py -b zk-hi3095 -w 2 send 'help'\n"
             "      eadk_board.py -b zk-hi3095 -w 0.5 send 'version'",
+    "login": "login [user [pass]] — 串口登录；无参则按优先级尝试\n"
+             "  1) 通道 target_username/password\n"
+             "  2) GET /agent/scan → login_credentials（靠前优先）\n"
+             "  3) EADK_USER/EADK_PASS\n"
+             "  试对后 POST /channel/configure persist 写回该通道\n"
+             "  例: eadk_board.py -b ok3568 login\n"
+             "      eadk_board.py -b ok3568 login root mypass",
     "run": "run <命令> — ensure + cmd（日常 shell 首选）\n"
            "  流程: ensure(可 power_on/login) → 同 cmd\n"
            "  例: eadk_board.py -B http://10.168.21.236:18081 -b ok3568 run 'uname -a'\n"
@@ -1454,9 +1818,6 @@ HELP_TOPICS = {
     "state": "state [名] — 状态摘要；无参=全部\n"
              "  例: eadk_board.py -B http://10.168.21.236:18081 state\n"
              "      eadk_board.py -B http://10.168.21.236:18081 -b ok3568 state",
-    "login": "login [user [pass]] — 串口/SSH 登录\n"
-             "  例: eadk_board.py -B http://10.168.21.236:18081 -b ok3568 login\n"
-             "      eadk_board.py -B http://10.168.21.236:18081 -b ok3568 login root mypass",
     "ensure": "ensure — 确保在 shell（可自动上电/登录）\n"
               "  例: eadk_board.py -B http://10.168.21.236:18081 -b ok3568 ensure",
     "keys": "keys <序列> [dur秒] [interval秒] — 轮询发键（字面字节 + <ctrl+c> 等）\n"
@@ -1530,10 +1891,13 @@ def usage() -> str:
   eadk_board.py -B http://桥:端口 scan
   eadk_board.py -b <名> list          # 只看该板 +/-
   eadk_board.py -b <名> run 'uname -a'
-  eadk_board.py -b <名> -w 1 send 'printenv'   # U-Boot/非shell
+  eadk_board.py -b <名> command 'uname -a'     # 纯异步 POST /command
+  eadk_board.py -b <名> -w 1 send 'printenv'   # U-Boot/非shell（command+等+log）
+  eadk_board.py -b <名> login                  # 板账密→候选列表
   eadk_board.py -b <名> action enter_uboot     # 有按钮才可
   eadk_board.py ls tools
   eadk_board.py put ./uImage board/uImage
+  eadk_board.py -b <名> to-board ./Image /tmp/Image   # 板拉/转发推/share
   eadk_board.py feedback bug '现象...'
 
 下载 CLI:
@@ -1549,7 +1913,7 @@ def cmd_help(topic: str = "") -> None:
     if not topic:
         print(usage())
         print("环境变量: EADK_BASE  EADK_BOARD  EADK_USER  EADK_PASS  EADK_PUT_CHUNK")
-        print("          EADK_FEEDBACK_HOOK|FEISHU_HOOK  EADK_HOST")
+        print("          EADK_HOST_USER  EADK_BOARD_USER  EADK_FEEDBACK_HOOK|FEISHU_HOOK  EADK_HOST")
         print("依赖: Python3 标准库；跨 Win/Linux")
         print("能力规则: eadk_board.py help caps")
         print("查看子命令: eadk_board.py help <子命令>")
@@ -1565,6 +1929,9 @@ def cmd_help(topic: str = "") -> None:
         return
     if topic in ("share_put", "upload"):
         print(HELP_TOPICS["put"])
+        return
+    if topic in ("to_board", "fetch", "pull-to-board"):
+        print(HELP_TOPICS["to-board"])
         return
     raise Die(f"无此帮助主题: {topic}")
 
@@ -1628,6 +1995,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             chunk = int(rest[2]) if len(rest) > 2 else 0
             c.cmd_put(rest[0], rest[1], chunk)
             return 0
+        if sub in ("to-board", "to_board", "fetch"):
+            if not rest:
+                raise Die("to-board <本地文件> [板端路径] [--method=auto|scp-pull|scp-push|share] ...")
+            c.cmd_to_board(rest)
+            return 0
         if sub in ("ls", "files"):
             c.cmd_ls(rest[0] if rest else "")
             return 0
@@ -1659,6 +2031,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if not rest:
                 raise Die("cmd <命令...>")
             c.cmd_cmd(" ".join(rest))
+            return 0
+        if sub in ("command", "raw-command"):
+            if not rest:
+                raise Die("command <命令...>  （仅异步 POST /command，不读 log）")
+            c.cmd_command(" ".join(rest))
             return 0
         if sub == "send":
             if not rest:
